@@ -46,6 +46,13 @@ class BaseAgent(ABC):
     stage: str = "unknown"
     description: str = "No description provided."
 
+    # --- MITRE ATT&CK mapping ---
+    # Used by ReportingAgent to map findings to the ATT&CK framework.
+    # Reference: https://attack.mitre.org/tactics/
+    # Does not affect pipeline execution — purely for reporting.
+    mitre_tactic: str = ""           # e.g. "TA0007"
+    mitre_tactic_name: str = ""      # e.g. "Discovery"
+
     # Whether this agent requires elevated privileges (sudo/root)
     requires_root: bool = False
 

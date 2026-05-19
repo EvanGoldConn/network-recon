@@ -24,13 +24,14 @@ import argparse
 import os
 from dotenv import load_dotenv
 
-# Import all agents to trigger @AgentRegistry.register decorators
+# Import all agents to trigger @AgentRegistry.register decorators.
+# Order here doesn't matter — pipeline order is defined in AgentRegistry.PIPELINE_ORDER.
+from agents.wifi_agent import WiFiAgent
+from agents.osint_agent import OSINTAgent
 from agents.discovery_agent import DiscoveryAgent
 from agents.access_agent import AccessAgent
-from modules.wifi.wifi_agent import WiFiAgent
-from modules.osint.osint_agent import OSINTAgent
-from modules.lateral.lateral_agent import LateralMovementAgent
-from modules.reporting.reporting_agent import ReportingAgent
+from agents.lateral_agent import LateralMovementAgent
+from agents.reporting_agent import ReportingAgent
 
 from core.engagement import EngagementContext
 from core.pipeline import PipelineRunner
