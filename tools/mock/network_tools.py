@@ -4,6 +4,7 @@
 
 import json
 from config import MOCK_NETWORK_FILE
+from core.vendors import get_rtsp_paths_for_vendor, get_http_paths_for_vendor
 
 #private helper#
 def _load_network():
@@ -27,18 +28,29 @@ def grab_banner(ip):
     devices = _load_network()
     for device in devices:
         if device["ip"] == ip:
-            return {"ip": ip, "banner": device["banner"]}
-    return {"ip": ip, "banner": "No banner retrieved"}
+            return {
+                "ip": ip, 
+                "banners": {
+                    80: device["banner"],
+                    554: "",
+                    8080: ""
+                }
+            }
+    return {"ip": ip, "banners": {80:"", 554:"", 8080:""}}
 
-def check_rtsp(ip, port):
+def check_rtsp(ip, port=554, vendor="generic_nvr"):
     devices = _load_network()
     for device in devices:
         if device["ip"] == ip and port in device["open_ports"]:
-            return {"ip": ip, "port": port, "status": "open", "stream": f"rtsp://{ip}:{port}/stream1"}
-    return {"ip": ip, "port": port, "status": "closed", "stream": None}
+            path = get_rtsp_paths_for_vendor(vendor)[0] #check against known paths in the core vendors dict
+            return {"ip": ip, "port": port, "status": "open", "stream_url": f"rtsp://{ip}:{port}{path}"}
+    return {"ip": ip, "port": port, "status": "closed", "stream_url": None}
 
-def test_credentials(ip, username, password):
+def test_credentials(ip, username, password, vendor="generic_nvr"):
     default_creds = [("admin", "admin"), ("admin", "12345"), ("root", "root")]
-    if (username, password) in default_creds:
-        return {"ip": ip, "username": username, "status": "success", "access": "full"}
-    return {"ip": ip, "username": username, "status": "failed", "access": None}
+    path = get_http_paths_for_vendor(vendor)[0]
+    if (username, password) in default_creds: #Yay success!
+        return {"ip": ip, "username": username, "password": password,
+                "status": "success", "access_level": "admin", "endpoint": path}
+    return {"ip": ip, "username": username, "password": password,
+            "status": "failed", "access_level": None, "endpoint": path}
