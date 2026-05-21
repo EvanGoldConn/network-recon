@@ -7,6 +7,7 @@ import requests
 import subprocess #run external CLI programs 
 from requests.auth import HTTPDigestAuth, HTTPBasicAuth
 import nmap
+import ssl #for SSL Wrapping for 443
 from config import DEFAULT_TIMEOUT, HTTP_TIMEOUT, SCAN_PORTS, NMAP_TIMEOUT
 from core.vendors import (
     identify_vendor,
@@ -167,8 +168,139 @@ def scan_network(network_range: str) -> list:
 
 
 
-def grab_banner(ip: str) -> dict:
-    pass
+def grab_banner(ip: str, open_ports: list = None) -> dict:
+    """
+    Grab HTTP/RTSP banners from open ports on a host.
+
+    Tries each open port, sends an appropriate request (HTTP HEAD for web ports,
+    RTSP OPTIONS for port 554), and reads the response headers back.
+    The Server: header is where vendor strings live (e.g. "Hikvision-Webs").
+
+    Args:
+        ip: Target IP address
+        open_ports: List of known open ports to probe. If None, falls back to
+                    [80, 554, 8080]. Passing open_ports avoids wasting socket
+                    timeouts against closed ports, and keeps this function
+                    useful beyond camera-specific targets.
+    Returns:
+        Dict with ip and banners: {port: banner_string}
+        Empty string for ports that didn't respond or returned nothing useful.
+    """
+
+    # Fall back to common camera/web ports if caller doesn't provide open ports.
+    # This keeps the function usable standalone without requiring a prior scan.
+    ports_to_probe = open_ports if open_ports is not None else [80, 554, 8080]
+
+    banners = {}
+
+    for port in ports_to_probe:
+        try:
+
+            # ----------------------------- SOCKET SETUP ----------------------------- 
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # Socket object, AF_INET=IPv4 (AF_INET6 is IPv6), SOCK_STREAM=TCP (SOCK_DGRAM=UDP)
+            s.settimeout(DEFAULT_TIMEOUT) #how long socket waits for repsonse before giving up, set in config.py
+            s.connect((ip, port)) # **TCP 3 WAY HANDSHAKE**
+            # ------------------------------------------------------------------------
+
+
+
+            # ----------------------------- SSL WRAPPING FOR HTTPS -----------------------------
+            #SSL Wrapping for HTTPS, disable cert validation cuz don't matter, 
+            #just need to grab banner
+            if port == 443: #HTTPS
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                s = context.wrap_socket(s, server_hostname=ip) #TLS Handshake on top of TCP connection
+            # ----------------------------------------------------------------------------------
+
+
+            # --------------------- BUILD REQUEST BASED ON PROTOCOL -------------------------
+            # RTSP & HTTP seperate protocols but both behave the same, return Server: headers
+            # SSL Wrapping handled above, HTTP80/443S both handled in the else statement
+            if port == 554: #RTSP
+                request = (
+                    f"OPTIONS rtsp://{ip}:{port}/ RTSP/1.0\r\n"
+                    f"CSeq: 1\r\n"
+                    f"\r\n"
+                ).encode()
+            else:
+                # HTTP HEAD for ports 80, 443, 8080
+                request = (
+                    f"HEAD / HTTP/1.0\r\n"
+                    f"Host: {ip}\r\n"
+                    f"\r\n"
+                ).encode()
+            # ---------------------------------------------------------------------------
+
+
+
+            # -------------------------- SEND & RECEIVE ----------------------------- 
+            s.send(request)
+                # Read up to 1024 bytes — we only need the headers, not the body
+            response = s.recv(1024).decode("utf-8", errors="ignore")
+            banners[port] = response
+            # ---------------------------------------------------------------------------
+
+
+            # ------------------------- HTTP/1.0 fallback ----------------------------
+            # Some devices (gSOAP, certain NVRs) only speak HTTP/1.1.
+            # If we get a 505, retry with HTTP/1.1 and Connection: close.
+            # Connection: close is required for HTTP/1.1 since it defaults
+            # to keep-alive which would hang the socket waiting for more data.
+            if "505" in response and port != 554: #!=554, RTSP doesn't have HTTP version concepts to skip retry
+                
+                # Server closes connection after sending a 505 back, need to open a new one..
+                try:
+                    s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s2.settimeout(DEFAULT_TIMEOUT)
+                    s2.connect((ip, port))
+
+                    if port == 443:
+                        context = ssl.create_default_context()
+                        context.check_hostname = False
+                        context.verify_mode = ssl.CERT_NONE
+                        s2 = context.wrap_socket(s2, server_hostname=ip)
+
+                    request = (
+                        f"HEAD / HTTP/1.1\r\n"
+                        f"Host: {ip}\r\n"
+                        f"Connection: close\r\n"
+                        f"\r\n"
+                    ).encode()
+                    s2.send(request)
+                    retry_response = s2.recv(1024).decode("utf-8", errors="ignore")
+                    if retry_response:
+                        banners[port] = retry_response
+                except (socket.timeout, ConnectionRefusedError, OSError):
+                    pass
+                finally:
+                    s2.close()
+
+
+                    # ------ NOTE2SELF -----
+                    # | If expanding this to work across multiple HTTP versions w/ varying fallback logic, 
+                    # | might be good idea to build this out recursively 
+                    # -----------------------
+
+
+            # --------------------------------------------------------------------------
+
+
+
+        except (socket.timeout, ConnectionRefusedError, OSError):
+            # Timeout or refused.. port may have been closed since the scan,
+            # or the device dropped the connection. Not an error worth logging.
+            banners[port] = ""
+
+        finally:
+            # Always close the socket, even if an exception occurred
+            s.close()
+
+    return {
+        "ip": ip,
+        "banners": banners
+    }
 
 def check_rtsp(ip: str, port: int = 554, vendor: str = "generic_nvr") -> dict:
     pass
@@ -186,6 +318,10 @@ def test_credentials(ip: str, username: str, password: str, vendor: str = "gener
 # // ------ TESTING ------ \\
 #run from root, [sudo] python -m tools.real.network_tools (-m= rul file as module from current dir)
 if __name__ == "__main__":
-    results = scan_network("")
-    for host in results:
-        print(host)
+    # Step 1: scan the network
+    hosts = scan_network("")
+    
+    # Step 2: feed each host into grab_banner
+    for host in hosts:
+        banner_result = grab_banner(host["ip"], host["open_ports"])
+        print(banner_result)
