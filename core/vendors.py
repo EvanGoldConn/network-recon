@@ -242,14 +242,29 @@ VENDOR_PROFILES = {
         ],
         "rtsp_paths": [
             "/stream1",
+            "/stream2",
             "/channel1",
             "/cam1/h264",
             "/live/ch0",
+            "/live/ch1",
             "/h264/ch1/main/av_stream",
+            "/h264/ch2/main/av_stream",
+            "/cam/realmonitor?channel=1&subtype=0",  # Dahua OEM
+            "/cam/realmonitor?channel=1&subtype=1",  # Dahua OEM sub-stream
+            "/h264Preview_01_main",                  # Reolink/HiSilicon OEM
+            "/h264Preview_01_sub",                   # Reolink/HiSilicon sub-stream
+            "/video1",                               # Common budget cam
+            "/video2",
+            "/stream",                               # Extremely common generic
+            "/live",
+            "/live/stream",
+            "/mediainput/h264",                      # Some Foscam/budget OEM
+            "/11",                                   # Some XM/Longse chipset OEM
+            "/12",                                   # XM sub-stream
         ],
         "known_cves": [],
         "notes": "Generic NVR detection. Try vendor-specific profiles first. "
-                 "Many budget NVRs are unbranded Hikvision or Dahua OEM.",
+                 "Many budget NVRs are unbranded Hikvision or Dahua OEM. Lots of overlap with paths",
     },
 }
 

@@ -164,10 +164,6 @@ def scan_network(network_range: str) -> list:
     print(f"[scan_network] Done — {len(results)} live hosts found")
     return results
 
-
-
-
-
 def grab_banner(ip: str, open_ports: list = None) -> dict:
     """
     Grab HTTP/RTSP banners from open ports on a host.
@@ -303,11 +299,83 @@ def grab_banner(ip: str, open_ports: list = None) -> dict:
     }
 
 def check_rtsp(ip: str, port: int = 554, vendor: str = "generic_nvr") -> dict:
-    pass
+    """
+    Check if an RTSP stream is accessible on a host and find a valid stream path.
+
+    Tries vendor-specific RTSP paths first, then falls back to generic_nvr paths.
+    Deduplicates paths across both lists to avoid redundant socket connections.
+
+    Any valid RTSP response (even 401 Unauthorized) confirms the stream exists
+    authentication is AccessAgent's job.
+
+    Args:
+        ip: Target IP address
+        port: RTSP port, defaults to 554 but cameras vary (8554, 37778, etc.)
+        vendor: Vendor key from VENDOR_PROFILES. Determines which paths to try first.
+
+    Returns:
+        Dict with ip, port, status ("open"/"closed"), and stream_url or None.
+    """
+
+    # Build deduplicated path list (vendor-specific first, generic fallback second)
+    # Using a set to track seen paths, list to preserve order
+    vendor_paths = get_rtsp_paths_for_vendor(vendor)
+    generic_paths = get_rtsp_paths_for_vendor("generic_nvr")
+
+    seen = set()
+    paths_to_try = []
+    for path in vendor_paths + generic_paths:
+        if path not in seen:
+            seen.add(path)
+            paths_to_try.append(path)
+
+    for path in paths_to_try:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(DEFAULT_TIMEOUT)
+            s.connect((ip, port))
+
+            # ---- RTSP OPTIONS  ----
+            # Service confirmation response, no stream yet
+            request = (
+                f"OPTIONS rtsp://{ip}:{port}{path} RTSP/1.0\r\n"
+                f"CSeq: 1\r\n"
+                f"\r\n"
+            ).encode()
+
+            s.send(request)
+            response = s.recv(1024).decode("utf-8", errors="ignore")
+
+            # Any RTSP response (even 401) confirms the stream path exists
+            # 401 means credentials required, which AccessAgent handles.
+            if response.startswith("RTSP/1.0") or response.startswith("RTSP/1.1"):
+                return {
+                    "ip": ip,
+                    "port": port,
+                    "status": "open",
+                    "stream_url": f"rtsp://{ip}:{port}{path}"
+                }
+
+        except (socket.timeout, ConnectionRefusedError, OSError):
+            # This path didn't respond, try the next one
+            continue
+
+        finally:
+            s.close()
+
+    # Nothing responded on any path
+    return {
+        "ip": ip,
+        "port": port,
+        "status": "closed",
+        "stream_url": None
+    }
 
 def test_credentials(ip: str, username: str, password: str, vendor: str = "generic_nvr") -> dict:
     pass
 
+def capture_frame(): #openVC capture frame
+    pass
 
 
 
@@ -325,3 +393,21 @@ if __name__ == "__main__":
     for host in hosts:
         banner_result = grab_banner(host["ip"], host["open_ports"])
         print(banner_result)
+
+        # Combine all banner strings for vendor fingerprinting
+        combined_banner = " ".join(banner_result["banners"].values())
+        vendor = identify_vendor(combined_banner, host["open_ports"], host["hostname"] or "")
+        print(f"[vendor] {host['ip']} → {vendor}")
+
+        # Step 3: Check RTSP 
+        rtsp_ports = [p for p in host["open_ports"] if p in [554, 8554, 37778]]
+        if rtsp_ports:
+            for rtsp_port in rtsp_ports:
+                rtsp_result = check_rtsp(host["ip"], rtsp_port, vendor)
+                print(rtsp_result)
+        else:
+            print(f"[check_rtsp] {host['ip']} — no RTSP ports open, skipping")
+
+    # Direct RTSP test against local mediamtx instance
+    rtsp_result = check_rtsp("127.0.0.1", 8554, "generic_nvr")
+    print(rtsp_result)
