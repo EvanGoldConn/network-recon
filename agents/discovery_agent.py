@@ -7,23 +7,50 @@ Internal network discovery. Assumes network access has already been
 established (via WiFiAgent, VPN, physical connection, or given access).
 
 WHAT THIS AGENT DOES:
-    1. Auto-detects local subnet if target_scope is empty
-    2. Runs ARP scan (if root) or nmap ping sweep (if not root)
-    3. Runs nmap port scan against each live host
-    4. Grabs banners from open ports via raw socket
-    5. Fingerprints device type and vendor from ports + banner content
-    6. Populates ctx.confirmed_hosts with HostRecord entries
-    7. Sanitizes all banner content before LLM ingestion (prompt injection defense)
+    1. Validates target_scope CIDR notation, auto-detects subnet if empty
+    2. Calls scan_network() — ARP + port scan via nmap
+    3. For each discovered host:
+       a. Hard scope gate via ctx.enforce_scope(ip)
+       b. Grabs banners from all open ports via grab_banner()
+       c. Checks banner for suspicious injection patterns → audit log warning
+       d. Wraps banner in XML tags before any LLM ingestion (prompt injection defense)
+       e. Re-fingerprints vendor from banner (more accurate than port-only guess)
+       f. LLM fallback via single prompt if vendor is still "unknown"
+          (low-confidence warning logged to audit trail)
+       g. Writes HostRecord to ctx
+    4. Marks stage complete
 
 TOOLS:
     - tool_scan_network: ARP + nmap, returns list of live hosts with ports
     - tool_grab_banner: raw socket to each open port, returns banner text
 
-LLM: Ollama/qwen2.5 (local, fast, free to run)
+CONTROL FLOW DESIGN:
+    Python drives deterministic workflow (scan, banner grab, vendor detection). 
+    LLM is only invoked as last resort when identify_vendor() returns "unknown", and only for
+    a single classification prompt (NOT a ReAct loop).
+ 
+    WHY NOT ReAct HERE:
+        The discovery sequence is always the same: scan → banner → classify, no branching logic 
+        that needs LLM judgment. ReAct adds latency/token cost/ failure modes with no upside 
+        for a fixed workflow. ReAct is used in AccessAgent where genuine reasoning
+        under uncertainty is needed.
+ 
+LLM Prompt injection defenses: see core/llm_defense.py
+ 
+LLM: Ollama / qwen2.5:7b (local, fast, no API cost)
 """
 
+import ipaddress
+import json
+ 
+from langchain_ollama import ChatOllama
+from langchain_core.messages import HumanMessage
+ 
 from core.base_agent import BaseAgent, AgentRegistry
-from core.engagement import EngagementContext
+from core.engagement import EngagementContext, HostRecord, ScopeViolationError
+from core.vendors import identify_vendor, identify_device_type
+from config import AGENT_MODEL
+from tools import scan_network, grab_banner
 
 
 @AgentRegistry.register

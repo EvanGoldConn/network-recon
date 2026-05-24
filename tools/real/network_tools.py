@@ -528,7 +528,7 @@ def test_credentials(ip: str, username: str, password: str, vendor: str = "gener
         1. For each vendor-specific HTTP path, send an unauthenticated probe GET.
         2. Read the WWW-Authenticate header to auto-detect HTTP auth type (Digest v Basic).
         3. For JSON API vendors (Reolink/Dahua), route directly to vendor-specific helper.
-        4. Return immediately on first success — no point testing more paths.
+        4. Return immediately on first success, no point testing more paths.
 
     Args:
         ip:       Target IP address

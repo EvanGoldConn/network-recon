@@ -100,15 +100,15 @@
 ### Phase 1 — Tools Layer
 Get the tools layer complete and consistent before touching agents.
 
-* [ ] 1. Update `tools/mock/network_tools.py` — match new signatures
+* [x] 1. Update `tools/mock/network_tools.py` — match new signatures
   * `grab_banner` returns `banners: {port: string}` dict instead of single string
   * Add `vendor` param to `check_rtsp` and `test_credentials` (mock can ignore it)
-* [ ] 2. Build `tools/real/network_tools.py` — all 4 functions
+* [x] 2. Build `tools/real/network_tools.py` — all 4 functions
   * `scan_network(network_range: str) -> list`
   * `grab_banner(ip: str) -> dict` — multi-port, returns all banners
   * `check_rtsp(ip: str, port: int = 554, vendor: str = "generic_nvr") -> dict`
   * `test_credentials(ip: str, username: str, password: str, vendor: str = "generic_nvr") -> dict`
-
+  * `ADDED: capture_frame()`
 ---
 
 ### Phase 2 — Core Agents

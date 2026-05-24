@@ -13,6 +13,7 @@ if MODE == "mock":
         grab_banner,
         check_rtsp,
         test_credentials,
+        capture_frame,
     )
 else:
     from tools.real.network_tools import (
@@ -20,4 +21,7 @@ else:
         grab_banner,
         check_rtsp,
         test_credentials,
+        capture_frame,
     )
+
+
