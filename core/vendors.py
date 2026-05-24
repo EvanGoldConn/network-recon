@@ -2,43 +2,45 @@
 core/vendors.py
 ----------------
 Vendor fingerprinting logic and default credential database.
-
+ 
 WHY THIS IS CENTRALIZED:
     Vendor-specific knowledge (default credentials, API paths, port signatures,
     CVE identifiers) is used by multiple agents — AccessAgent tests credentials,
     LateralMovementAgent does credential reuse, ReportingAgent cites CVEs.
-
+ 
     Centralizing it here means:
     - Adding a new vendor = one dict entry, not edits across 3 agents
     - Credential lists are the same everywhere (no drift)
     - Easy to update when new CVEs or default creds are published
-
+ 
 CREDENTIAL SOURCES:
     Primary: SecLists (https://github.com/danielmiessler/SecLists)
         - Passwords/Default-Credentials/default-credentials-for-services.csv
         - Passwords/Default-Credentials/camera-default-passwords.txt
     Secondary: vendor security advisories and CVE descriptions
     Tertiary: community pen-testing resources (pentestmonkey, exploit-db)
-
+ 
     These are well-maintained, publicly available lists used by the
     security research community. Not scraping or guessing — documented defaults.
-
+ 
 ADDING A NEW VENDOR:
     Add an entry to VENDOR_PROFILES with:
     - fingerprint: list of strings to look for in banners/headers
-    - ports: typical open ports (used for device_type detection)
+    - typical_ports: typical open ports (used for device_type detection)
     - credentials: list of (username, password) tuples to try
     - http_auth_paths: list of URL paths to POST credentials to
     - rtsp_paths: list of RTSP stream URL patterns to try
+    - rtsp_enabled_by_default: bool — whether RTSP is on out of the box
+    - snapshot_path: HTTP endpoint for single JPEG capture (fallback if RTSP disabled)
     - known_cves: list of relevant CVE IDs (for reporting)
 """
-
+ 
 # ---------------------------------------------------------------------------
 # Vendor profiles
 # ---------------------------------------------------------------------------
-
+ 
 VENDOR_PROFILES = {
-
+ 
     "hikvision": {
         "display_name": "Hikvision",
         "fingerprint": [
@@ -64,6 +66,12 @@ VENDOR_PROFILES = {
             "/Streaming/Channels/101",
             "/stream1",
         ],
+        # RTSP is enabled by default on Hikvision — port 554 active out of box.
+        # Some models also use 10554 as an alternate default.
+        "rtsp_enabled_by_default": True,
+        # ISAPI snapshot endpoint — returns a single JPEG, requires Digest auth.
+        # Useful as fallback if RTSP stream drops or OpenCV fails.
+        "snapshot_path": "/ISAPI/Streaming/channels/1/picture",
         "known_cves": [
             "CVE-2021-36260",  # Remote code execution via /SDK/webLanguage
             "CVE-2017-7921",   # Authentication bypass
@@ -72,7 +80,7 @@ VENDOR_PROFILES = {
         "notes": "CVE-2021-36260 is a critical RCE present in firmware before 2021-10. "
                  "Check /SDK/webLanguage endpoint before credential testing.",
     },
-
+ 
     "dahua": {
         "display_name": "Dahua",
         "fingerprint": [
@@ -97,6 +105,10 @@ VENDOR_PROFILES = {
             "/h264/ch1/main/av_stream",
             "/live",
         ],
+        # RTSP enabled by default on port 554.
+        "rtsp_enabled_by_default": True,
+        # CGI snapshot endpoint — returns JPEG, requires Digest or Basic auth.
+        "snapshot_path": "/cgi-bin/snapshot.cgi?channel=1",
         "known_cves": [
             "CVE-2021-33044",  # Authentication bypass
             "CVE-2021-33045",  # Authentication bypass variant
@@ -105,7 +117,7 @@ VENDOR_PROFILES = {
         "notes": "CVE-2021-33044/33045 bypass authentication entirely on affected firmware. "
                  "Test /RPC2_Login with crafted packet before password testing.",
     },
-
+ 
     "axis": {
         "display_name": "Axis",
         "fingerprint": [
@@ -128,6 +140,10 @@ VENDOR_PROFILES = {
             "/mpeg4/media.amp",
             "/mjpg/video.mjpg",
         ],
+        # RTSP enabled by default on port 554.
+        "rtsp_enabled_by_default": True,
+        # Axis VAPIX snapshot endpoint — well documented, very reliable.
+        "snapshot_path": "/axis-cgi/jpg/image.cgi",
         "known_cves": [
             "CVE-2018-10660",  # Shell command injection
             "CVE-2020-29560",  # Buffer overflow
@@ -135,7 +151,7 @@ VENDOR_PROFILES = {
         "notes": "Older Axis cameras (pre-2016) ship with root:pass default. "
                  "Modern units prompt for password change on first boot.",
     },
-
+ 
     "reolink": {
         "display_name": "Reolink",
         "fingerprint": [
@@ -156,11 +172,20 @@ VENDOR_PROFILES = {
             "/h264Preview_01_sub",
             "/bcs/channel0_main.bcs",
         ],
+        # RTSP is DISABLED by default on Reolink — must be manually enabled via
+        # web UI under Network > Advanced > Port Settings before port 554 opens.
+        # capture_frame() uses snapshot_path as primary capture method for Reolink.
+        "rtsp_enabled_by_default": False,
+        # Reolink JSON API snapshot endpoint.
+        # The {token} placeholder is replaced at runtime with the session token
+        # returned by _try_reolink_json_auth() after successful login.
+        "snapshot_path": "/cgi-bin/api.cgi?cmd=Snap&channel=0&rs={token}",
         "known_cves": [],
         "notes": "Reolink uses a JSON API. Login endpoint returns a token for subsequent requests. "
-                 "Admin with empty password is the most common default.",
+                 "Admin with empty password is the most common default. "
+                 "RTSP disabled by default — enable via Network > Advanced > Port Settings.",
     },
-
+ 
     "amcrest": {
         "display_name": "Amcrest",
         "fingerprint": [
@@ -180,13 +205,17 @@ VENDOR_PROFILES = {
             "/cam/realmonitor?channel=1&subtype=0",
             "/h264/ch1/main/av_stream",
         ],
+        # RTSP enabled by default — same behavior as Dahua (OEM).
+        "rtsp_enabled_by_default": True,
+        # Same snapshot path as Dahua — shared firmware base.
+        "snapshot_path": "/cgi-bin/snapshot.cgi?channel=1",
         "known_cves": [
             "CVE-2021-33044",  # Shared with Dahua (same firmware base)
             "CVE-2021-33045",
         ],
         "notes": "Amcrest hardware is OEM Dahua. Same CVEs and auth bypass paths apply.",
     },
-
+ 
     "hanwha": {
         "display_name": "Hanwha (Samsung Techwin)",
         "fingerprint": [
@@ -207,13 +236,17 @@ VENDOR_PROFILES = {
             "/profile2/media.smp",
             "/video1",
         ],
+        # RTSP enabled by default on port 554.
+        "rtsp_enabled_by_default": True,
+        # Hanwha CGI snapshot endpoint — returns JPEG.
+        "snapshot_path": "/cgi-bin/cgiin.cgi?msubmenu=jpg&action=view",
         "known_cves": [
             "CVE-2018-1149",   # Auth bypass in Hanwha cameras
             "CVE-2018-1150",
         ],
         "notes": "CVE-2018-1149 allows unauthenticated root shell via specific CGI endpoint.",
     },
-
+ 
     "generic_nvr": {
         "display_name": "Generic NVR/DVR",
         "fingerprint": [
@@ -262,6 +295,11 @@ VENDOR_PROFILES = {
             "/11",                                   # Some XM/Longse chipset OEM
             "/12",                                   # XM sub-stream
         ],
+        # Assume RTSP enabled by default for unknown devices — if port 554 is open
+        # we attempt it. capture_frame() falls back to snapshot if RTSP fails.
+        "rtsp_enabled_by_default": True,
+        # Generic CGI snapshot — works on many budget NVRs and OEM Dahua devices.
+        "snapshot_path": "/cgi-bin/snapshot.cgi",
         "known_cves": [],
         "notes": "Generic NVR detection. Try vendor-specific profiles first. "
                  "Many budget NVRs are unbranded Hikvision or Dahua OEM. Lots of overlap with paths",
@@ -363,3 +401,28 @@ def get_http_paths_for_vendor(vendor_key: str) -> list:
     if vendor_key in VENDOR_PROFILES:
         return VENDOR_PROFILES[vendor_key]["http_auth_paths"]
     return VENDOR_PROFILES["generic_nvr"]["http_auth_paths"]
+
+
+def get_snapshot_path_for_vendor(vendor_key: str) -> str:
+    """
+    Return the HTTP snapshot endpoint for a vendor.
+    Falls back to generic_nvr snapshot path if vendor unknown.
+ 
+    The Reolink path contains a {token} placeholder — replace at runtime
+    with the session token from _try_reolink_json_auth().
+    """
+    if vendor_key in VENDOR_PROFILES:
+        return VENDOR_PROFILES[vendor_key]["snapshot_path"]
+    return VENDOR_PROFILES["generic_nvr"]["snapshot_path"]
+ 
+ 
+def is_rtsp_enabled_by_default(vendor_key: str) -> bool:
+    """
+    Return whether RTSP is enabled out of the box for this vendor.
+ 
+    Used by capture_frame() to decide whether to attempt RTSP first
+    or go straight to HTTP snapshot (e.g. Reolink).
+    """
+    if vendor_key in VENDOR_PROFILES:
+        return VENDOR_PROFILES[vendor_key]["rtsp_enabled_by_default"]
+    return True  # assume enabled for unknown vendors

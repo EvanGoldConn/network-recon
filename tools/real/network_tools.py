@@ -8,13 +8,15 @@ import subprocess #run external CLI programs
 from requests.auth import HTTPDigestAuth, HTTPBasicAuth
 import nmap
 import ssl #for SSL Wrapping for 443
-from config import DEFAULT_TIMEOUT, HTTP_TIMEOUT, SCAN_PORTS, NMAP_TIMEOUT
+from config import DEFAULT_TIMEOUT, HTTP_TIMEOUT, SCAN_PORTS, NMAP_TIMEOUT, ARTIFACTS_DIR
 from core.vendors import (
     identify_vendor,
     identify_device_type,
     get_rtsp_paths_for_vendor,
     get_http_paths_for_vendor,
-    get_credentials_for_vendor
+    get_credentials_for_vendor,
+    is_rtsp_enabled_by_default,
+    get_snapshot_path_for_vendor
 )
 
 def scan_network(network_range: str) -> list:
@@ -623,8 +625,159 @@ def test_credentials(ip: str, username: str, password: str, vendor: str = "gener
         "auth_type": None
     }
 
-def capture_frame(): #openVC capture frame
-    pass
+def capture_frame(
+    ip: str,
+    stream_url: str,
+    username: str,
+    password: str,
+    vendor: str = "generic_nvr",
+    token: str = None,
+    engagement_id: str = "default"
+) -> dict:
+    """
+    Capture a single frame from a camera as proof of access.
+
+    Tries RTSP first (w/ OpenCV) if the vendor has RTSP enabled by default and a stream_url is available. 
+    Falls back to HTTP snapshot if RTSP fails or is disabled (e.g. Reolink with RTSP off).
+
+    Frames are saved as JPEGs to ARTIFACTS_DIR/engagement_id/
+    Named by IP & timestamp so captures don't overwrite each other.
+
+    Args:
+        ip:            Target IP address
+        stream_url:    RTSP URL from check_rtsp(), None if RTSP not available
+        username:      Authenticated username from test_credentials()
+        password:      Authenticated password from test_credentials()
+        vendor:        Vendor key, determines capture strategy
+        token:         Reolink session token from _try_reolink_json_auth()
+                       Required for Reolink snapshot path substitution
+        engagement_id: Used to organize artifacts by engagement
+
+    Returns:
+        Dict with ip, status ("captured"/"failed"), method, and artifact_path
+    """
+
+    #deferred imports, heavy libraries only used here
+    import cv2 #openCV
+    import numpy as np
+    from datetime import datetime
+
+    # --- Build artifact output path ---
+    # Create subdirectory for curEngagement if it doesn't exist.
+    # Timestamped filename to prevent prev capture overwrite
+    artifact_dir = os.path.join(ARTIFACTS_DIR, engagement_id)
+    os.makedirs(artifact_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{ip.replace('.', '_')}_{timestamp}.jpg"
+    output_path = os.path.join(artifact_dir, filename)
+
+    # --- Strategy 1: RTSP via OpenCV ---
+    # Only attempt if vendor has RTSP enabled by default and we have a stream URL.
+    # Build authenticated URL: rtsp://user:pass@ip:port/path
+    if stream_url and is_rtsp_enabled_by_default(vendor):
+        try:
+            # Inject credentials into stream URL
+            # stream_url format: rtsp://ip:port/path
+            # authenticated format: rtsp://user:pass@ip:port/path
+            auth_stream_url = stream_url.replace(
+                "rtsp://", f"rtsp://{username}:{password}@"
+            )
+
+            cap = cv2.VideoCapture(auth_stream_url)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # minimize buffer, grab latest frame 
+            #(without this OpenCV buffers several frames, you may get a stale frame from seconds ago instead of the current one)
+
+            # Give the stream a moment to connect and buffer,then read frames until we get a valid one
+            for FRAMES in range(10):  # try up to 10 frames max
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    cv2.imwrite(output_path, frame)
+                    cap.release()
+                    print(f"[capture_frame] {ip} — RTSP capture saved to {output_path}")
+                    return {
+                        "ip": ip,
+                        "status": "captured",
+                        "method": "rtsp",
+                        "artifact_path": output_path
+                    }
+
+            cap.release()
+            print(f"[capture_frame] {ip} — RTSP returned no valid frames, trying snapshot")
+
+        except Exception as e:
+            print(f"[capture_frame] {ip} — RTSP failed: {e}, trying snapshot")
+
+    # --- Strategy 2: HTTP snapshot ---
+    # Used when: RTSP disabled (Reolink default), RTSP failed, or no stream_url.
+    # Each vendor has a specific snapshot endpoint in vendors.py.
+    try:
+        snapshot_path = get_snapshot_path_for_vendor(vendor)
+
+        # Reolink snapshot requires a session token in the URL.
+        # token comes from _try_reolink_json_auth() stored in test_credentials result.
+        if "{token}" in snapshot_path:
+            if not token:
+                print(f"[capture_frame] {ip} — Reolink snapshot requires token, none provided")
+                return {
+                    "ip": ip,
+                    "status": "failed",
+                    "method": "snapshot",
+                    "artifact_path": None
+                }
+            snapshot_path = snapshot_path.replace("{token}", token)
+
+        url = f"http://{ip}{snapshot_path}"
+
+        # Try Digest auth first, more common on cameras, fall back to Basic if Digest fails.
+        response = None
+        for auth in [HTTPDigestAuth(username, password), HTTPBasicAuth(username, password)]:
+            r = requests.get(url, auth=auth, timeout=HTTP_TIMEOUT, stream=True)
+            if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
+                response = r
+                break
+
+        if response is None:
+            print(f"[capture_frame] {ip} — snapshot endpoint returned no image")
+            return {
+                "ip": ip,
+                "status": "failed",
+                "method": "snapshot",
+                "artifact_path": None
+            }
+
+        # Decode JPEG bytes via numpy + OpenCV so we can verify it's a valid image before saving. Avoids writing 
+        # corrupted/empty files as artifacts
+        img_array = np.frombuffer(response.content, dtype=np.uint8)
+        frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+        if frame is None:
+            print(f"[capture_frame] {ip} — snapshot response was not a valid image")
+            return {
+                "ip": ip,
+                "status": "failed",
+                "method": "snapshot",
+                "artifact_path": None
+            }
+
+        cv2.imwrite(output_path, frame)
+        print(f"[capture_frame] {ip} — snapshot captured, saved to {output_path}")
+        return {
+            "ip": ip,
+            "status": "captured",
+            "method": "snapshot",
+            "artifact_path": output_path
+        }
+
+    except Exception as e:
+        print(f"[capture_frame] {ip} — snapshot failed: {e}")
+
+    # Both strategies failed
+    return {
+        "ip": ip,
+        "status": "failed",
+        "method": None,
+        "artifact_path": None
+    }
 
 
 
