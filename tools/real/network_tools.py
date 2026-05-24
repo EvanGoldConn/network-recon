@@ -188,7 +188,7 @@ def grab_banner(ip: str, open_ports: list = None) -> dict:
 
     # Fall back to common camera/web ports if caller doesn't provide open ports.
     # This keeps the function usable standalone without requiring a prior scan.
-    ports_to_probe = open_ports if open_ports is not None else [80, 554, 8080]
+    ports_to_probe = open_ports if open_ports is not None else [80, 443, 554, 8080]
 
     banners = {}
 
@@ -625,15 +625,9 @@ def test_credentials(ip: str, username: str, password: str, vendor: str = "gener
         "auth_type": None
     }
 
-def capture_frame(
-    ip: str,
-    stream_url: str,
-    username: str,
-    password: str,
-    vendor: str = "generic_nvr",
-    token: str = None,
-    engagement_id: str = "default"
-) -> dict:
+def capture_frame(ip: str, stream_url: str, username: str, password: str, 
+                  vendor: str = "generic_nvr", token: str = None, 
+                  engagement_id: str = "default") -> dict:
     """
     Capture a single frame from a camera as proof of access.
 
@@ -813,12 +807,28 @@ if __name__ == "__main__":
         #step 4: test default_creds() 
         
         creds = get_credentials_for_vendor(vendor)
+        valid_creds = None
+        token = None
         for username, password in creds:
             result = test_credentials(host["ip"], username, password, vendor)
             print(result)
             if result["status"] == "success":
                 print(f"[!] VALID CREDENTIALS FOUND: {username}:{password} on {host['ip']}")
                 break  # stop testing once we have valid creds
+
+         # Step 5: test capture frame if we have valid creds
+        if valid_creds:
+            username, password = valid_creds
+            capture_result = capture_frame(
+                ip=host["ip"],
+                stream_url=stream_url,
+                username=username,
+                password=password,
+                vendor=vendor,
+                token=token,
+                engagement_id="test_engagement"
+            )
+            print(capture_result)
 
     # Direct RTSP test against local mediamtx instance
     rtsp_result = check_rtsp("127.0.0.1", 8554, "generic_nvr")
