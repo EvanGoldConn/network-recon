@@ -141,7 +141,15 @@ class EngagementContext:
     """
 
     # --- Identity ---
-    engagement_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # engagement_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    engagement_id: str = field(
+            default_factory=lambda: f"engagement-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:4]}"
+            #UTC: default_factory=lambda: f"engagement-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:4]}"
+            )           
+             
+    
+    
+    #engagement-20260525-localsystemtimestamp-randomsuffix
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     # --- Scope (immutable after init) ---

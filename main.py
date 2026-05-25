@@ -71,7 +71,7 @@ def main():
     from agents.wifi_agent import WiFiAgent
     from agents.osint_agent import OSINTAgent
     from agents.discovery_agent import DiscoveryAgent
-    from agents.access_agent import AccessAgent
+    from agents.camera_access_agent import CameraAccessAgent
     from agents.lateral_agent import LateralMovementAgent
     from agents.reporting_agent import ReportingAgent
 
@@ -83,9 +83,14 @@ def main():
         print(f"[Main] Resuming engagement from {args.resume}")
         ctx = EngagementContext.load(args.resume)
     else:
-        ctx = EngagementContext(
-            engagement_id=args.engagement_id or None,
-            target_scope=args.scope or [],
+        if args.engagement_id: 
+            ctx = EngagementContext(
+                engagement_id=args.engagement_id,
+                target_scope=args.scope or [],
+            )
+        else: #if no engagementID defined, it will just auto-generate one within the EngagementContext class
+            ctx = EngagementContext(
+                target_scope=args.scope or [],
         )
 
     print(f"\n[Main] Engagement ID: {ctx.engagement_id}")

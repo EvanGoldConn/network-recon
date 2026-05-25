@@ -34,7 +34,7 @@ CURRENT DEFENSE LAYERS:
 # Content longer than this threshold is flagged as suspicious.
 # Real device banners are short.. 200+ byte Server is sus
 # Adjust if legitimate devices in your environment produce longer banners.
-SUSPICIOUS_LENGTH_THRESHOLD = 200
+SUSPICIOUS_LENGTH_THRESHOLD = 500
 
 # Keywords that suggest content is attempting to issue instructions to an LLM.this is heuristic first pass, not a blocklist.
 # TODO: look up for heuristic seclists see if any exist

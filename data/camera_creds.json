@@ -1,0 +1,112 @@
+{
+    "_metadata": {
+        "description": "Default credentials for IP security cameras and NVR/DVR systems",
+        "sources": [
+            "SecLists/Passwords/Default-Credentials/default-passwords.csv (danielmiessler)",
+            "Vendor documentation and CVE disclosures",
+            "core/vendors.py vendor-specific defaults"
+        ],
+        "notes": [
+            "Vendor-specific credentials in core/vendors.py take priority over this list.",
+            "This list is the fallback for edge cases, unusual firmware versions,",
+            "and vendors not covered by vendors.py.",
+            "TODO: expand with full SecLists coverage if project scope grows beyond",
+            "security cameras to include routers, printers, and other network devices."
+        ],
+        "format": "Each entry: {username, password, vendor, notes}"
+    },
+
+    "generic": [
+        {"username": "admin",   "password": "admin",    "notes": "Most common camera default"},
+        {"username": "admin",   "password": "12345",    "notes": "Hikvision early firmware — CVE-2017-7921"},
+        {"username": "admin",   "password": "123456",   "notes": "Common budget camera default"},
+        {"username": "admin",   "password": "password", "notes": "Samsung IP camera default"},
+        {"username": "admin",   "password": "",         "notes": "Blank password — very common on cheap cameras"},
+        {"username": "admin",   "password": "1234",     "notes": "Interlogix/TruVision default"},
+        {"username": "admin",   "password": "9999",     "notes": "Some Dahua OEM variants"},
+        {"username": "admin",   "password": "888888",   "notes": "Dahua legacy firmware"},
+        {"username": "admin",   "password": "666666",   "notes": "Dahua legacy firmware"},
+        {"username": "user",    "password": "user",     "notes": "Bosch secondary account"},
+        {"username": "guest",   "password": "guest",    "notes": "Common read-only account"},
+        {"username": "guest",   "password": "",         "notes": "Blank guest account"},
+        {"username": "root",    "password": "root",     "notes": "Linux-based camera firmware"},
+        {"username": "root",    "password": "",         "notes": "Blank root — embedded Linux cameras"},
+        {"username": "root",    "password": "12345",    "notes": "Some embedded camera firmware"},
+        {"username": "service", "password": "service",  "notes": "Bosch service account"},
+        {"username": "live",    "password": "live",     "notes": "Bosch viewer account"}
+    ],
+
+    "hikvision": [
+        {"username": "admin",   "password": "12345",    "notes": "Pre-2017 factory default — CVE-2017-7921"},
+        {"username": "admin",   "password": "admin",    "notes": "Some OEM/rebadged variants"},
+        {"username": "admin",   "password": "",         "notes": "Post-2017 requires setup — but some skip it"}
+    ],
+
+    "dahua": [
+        {"username": "admin",   "password": "admin",    "notes": "Factory default"},
+        {"username": "admin",   "password": "888888",   "notes": "Legacy firmware default"},
+        {"username": "admin",   "password": "666666",   "notes": "Legacy firmware default"},
+        {"username": "admin",   "password": "",         "notes": "Some OEM variants"},
+        {"username": "888888",  "password": "888888",   "notes": "Dahua DVR secondary account"},
+        {"username": "666666",  "password": "666666",   "notes": "Dahua DVR secondary account"},
+        {"username": "default", "password": "",         "notes": "Dahua default viewer account"}
+    ],
+
+    "axis": [
+        {"username": "root",    "password": "pass",     "notes": "SecLists — Axis Communications default"},
+        {"username": "root",    "password": "root",     "notes": "Some Axis firmware variants"},
+        {"username": "admin",   "password": "admin",    "notes": "Axis OEM variants"},
+        {"username": "root",    "password": "",         "notes": "Some older Axis cameras"}
+    ],
+
+    "amcrest": [
+        {"username": "admin",   "password": "admin",    "notes": "Factory default"},
+        {"username": "admin",   "password": "888888",   "notes": "Inherited from Dahua OEM base"},
+        {"username": "admin",   "password": "666666",   "notes": "Inherited from Dahua OEM base"}
+    ],
+
+    "reolink": [
+        {"username": "admin",   "password": "",         "notes": "Factory default — blank password"},
+        {"username": "admin",   "password": "admin",    "notes": "Some firmware variants"}
+    ],
+
+    "hanwha": [
+        {"username": "admin",   "password": "admin",    "notes": "Wisenet/Samsung Techwin default"},
+        {"username": "admin",   "password": "password", "notes": "SecLists — Samsung IP camera"},
+        {"username": "admin",   "password": "4321",     "notes": "Some Hanwha NVR variants"}
+    ],
+
+    "foscam": [
+        {"username": "admin",   "password": "",         "notes": "SecLists — Foscam factory default"},
+        {"username": "admin",   "password": "foscam",   "notes": "Some Foscam firmware versions"},
+        {"username": "user",    "password": "",         "notes": "Foscam viewer account"}
+    ],
+
+    "bosch": [
+        {"username": "live",    "password": "live",     "notes": "SecLists — Bosch viewer account"},
+        {"username": "service", "password": "service",  "notes": "SecLists — Bosch service account"},
+        {"username": "admin",   "password": "admin",    "notes": "Bosch Divar/FlexiDome default"},
+        {"username": "admin",   "password": "",         "notes": "Some Bosch firmware variants"}
+    ],
+
+    "uniview": [
+        {"username": "admin",   "password": "123456",   "notes": "Uniview factory default"},
+        {"username": "admin",   "password": "admin123", "notes": "Some Uniview OEM variants"}
+    ],
+
+    "vivotek": [
+        {"username": "root",    "password": "",         "notes": "Vivotek factory default — blank password"},
+        {"username": "admin",   "password": "admin",    "notes": "Some Vivotek firmware variants"}
+    ],
+
+    "generic_nvr": [
+        {"username": "admin",   "password": "admin",    "notes": "Most common NVR default"},
+        {"username": "admin",   "password": "12345",    "notes": "Common budget NVR"},
+        {"username": "admin",   "password": "123456",   "notes": "Common budget NVR"},
+        {"username": "admin",   "password": "",         "notes": "Blank password NVRs"},
+        {"username": "admin",   "password": "1111",     "notes": "Some Chinese OEM NVRs"},
+        {"username": "admin",   "password": "1234",     "notes": "Some Chinese OEM NVRs"},
+        {"username": "888888",  "password": "888888",   "notes": "Dahua-based NVR OEMs"},
+        {"username": "root",    "password": "root",     "notes": "Linux NVR firmware"}
+    ]
+}

@@ -195,7 +195,8 @@ VENDOR_PROFILES = {
         "credentials": [
             ("admin", "admin"),
             ("admin", ""),
-            ("admin", "YWRtaW4="),  # base64 "admin" — used in some firmwares
+            ("admin", "YWRtaW4="),  # base64 "admin" — used in some firmwares, this is correct.
+             # literal base64 string sent as password in some Amcrest JSON auth payloads
         ],
         "http_auth_paths": [
             "/cgi-bin/magicBox.cgi?action=getSystemInfo",

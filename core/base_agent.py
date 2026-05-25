@@ -143,7 +143,7 @@ class AgentRegistry:
         "wifi",
         "osint",
         "discovery",
-        "access",
+        "camera_access",
         "lateral",
         "reporting",
     ]

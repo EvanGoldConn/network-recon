@@ -40,7 +40,7 @@ class PipelineRunner:
     USAGE:
         runner = PipelineRunner(ctx)
         runner.add_stage("discovery")
-        runner.add_stage("access")
+        runner.add_stage("camera_access")
         ctx = runner.run()
 
     OR run the full pipeline:
