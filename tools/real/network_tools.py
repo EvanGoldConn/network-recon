@@ -8,7 +8,7 @@ import subprocess #run external CLI programs
 from requests.auth import HTTPDigestAuth, HTTPBasicAuth
 import nmap
 import ssl #for SSL Wrapping for 443
-from config import DEFAULT_TIMEOUT, HTTP_TIMEOUT, SCAN_PORTS, NMAP_TIMEOUT, ARTIFACTS_DIR
+from config import DEFAULT_TIMEOUT, HTTP_TIMEOUT, SCAN_PORTS, NMAP_TIMEOUT, ARTIFACTS_DIR, VERBOSE
 from core.vendors import (
     identify_vendor,
     identify_device_type,
@@ -239,6 +239,7 @@ def grab_banner(ip: str, open_ports: list = None) -> dict:
                 # Read up to 1024 bytes — we only need the headers, not the body
             response = s.recv(1024).decode("utf-8", errors="ignore")
             banners[port] = response
+            if VERBOSE: print(f"\t\t [VERBOSE - grab_banner() - Probe Response] {ip}:{port} → {response[:200].strip()}")
             # ---------------------------------------------------------------------------
 
 
@@ -348,7 +349,7 @@ def check_rtsp(ip: str, port: int = 554, vendor: str = "generic_nvr") -> dict:
 
             s.send(request)
             response = s.recv(1024).decode("utf-8", errors="ignore")
-
+            if VERBOSE: print(f"\t\t[VERBOSE - check_rtsp() - Socket Response] {ip}:{port} trying {path} → {response[:100].strip()}")
             # Any RTSP response (even 401) confirms the stream path exists
             # 401 means credentials required, which AccessAgent handles.
             if response.startswith("RTSP/1.0") or response.startswith("RTSP/1.1"):
@@ -375,7 +376,7 @@ def check_rtsp(ip: str, port: int = 554, vendor: str = "generic_nvr") -> dict:
     }
 
 # ------------------ HELPER FUNCTIONS FOR TEST_CREDENTIALS() -------------------------------
-def _try_digest_auth(ip: str, path: str, username: str, password: str) -> dict | None:
+def _try_digest_auth(ip: str, path: str, username: str, password: str, probe_body=None) -> dict | None:
     """
     Attempt HTTP Digest authentication against a specific endpoint.
 
@@ -383,6 +384,15 @@ def _try_digest_auth(ip: str, path: str, username: str, password: str) -> dict |
     More secure than Basic since credentials aren't sent in plaintext. Common on Hikvision, Axis, Hanwha.
 
     Returns result dict on success, None on failure.
+
+    False positive detection:
+        Some devices return HTTP 200 for all requests regardless of credentials
+        (routers serving public pages, printers, devices with no real auth enforcement).
+        To filter these out,  caller passes probe_body (raw response bytes
+        from an unauthenticated GET to the same endpoint).. if our authenticated
+        response body is byte-for-byte identical to the unauthenticated probe,
+        credentials made no difference and this is a false positive. 
+        Handles all edge cases: chunked responses, redirects, missing Content-Length.
     """
     try:
         url = f"http://{ip}{path}"
@@ -392,6 +402,10 @@ def _try_digest_auth(ip: str, path: str, username: str, password: str) -> dict |
             timeout=HTTP_TIMEOUT
         )
         if r.status_code == 200:
+            # If content length = unauthenticated probe, credentials made no difference,
+            # device serves 200 to everyone (FALSE POSITIVE)
+            if probe_body is not None and r.content == probe_body:
+                return None  # response identical to unauthenticated probe — false positive
             return {
                 "status": "success",
                 "auth_type": "digest",
@@ -402,7 +416,7 @@ def _try_digest_auth(ip: str, path: str, username: str, password: str) -> dict |
         pass
     return None
 
-def _try_basic_auth(ip: str, path: str, username: str, password: str) -> dict | None:
+def _try_basic_auth(ip: str, path: str, username: str, password: str, probe_body=None) -> dict | None:
     """
     Attempt HTTP Basic authentication against a specific endpoint.
 
@@ -410,6 +424,15 @@ def _try_basic_auth(ip: str, path: str, username: str, password: str) -> dict | 
     Essentially plaintext, less secure than Digest, but still common on budget cameras and older firmware.
 
     Returns result dict on success, None on failure.
+
+    False positive detection:
+        Some devices return HTTP 200 for all requests regardless of credentials
+        (routers serving public pages, printers, devices with no real auth enforcement).
+        To filter these out,  caller passes probe_body (raw response bytes
+        from an unauthenticated GET to the same endpoint).. if our authenticated
+        response body is byte-for-byte identical to the unauthenticated probe,
+        credentials made no difference and this is a false positive. 
+        Handles all edge cases: chunked responses, redirects, missing Content-Length.
     """
     try:
         url = f"http://{ip}{path}"
@@ -419,6 +442,10 @@ def _try_basic_auth(ip: str, path: str, username: str, password: str) -> dict | 
             timeout=HTTP_TIMEOUT
         )
         if r.status_code == 200:
+            # If content length = unauthenticated probe, credentials made no difference,
+            # device serves 200 to everyone (FALSE POSITIVE)
+            if probe_body is not None and r.content == probe_body:
+                return None  # response identical to unauthenticated probe — false positive
             return {
                 "status": "success",
                 "auth_type": "basic",
@@ -576,27 +603,30 @@ def test_credentials(ip: str, username: str, password: str, vendor: str = "gener
             # Send unauthenticated request, server tells us what it expects via WWW-Authenticate header. 
             # This avoids guessing auth type
             probe = requests.get(url, timeout=HTTP_TIMEOUT)
+            probe_body = probe.content  #Used for False Positive 200 return check in http auth, raw bytes
+            if VERBOSE: print(f"\t\t[VERBOSE - test_credentials() - HTTP Probe Response] {ip}{path} probe → {probe.status_code} {probe.headers.get('WWW-Authenticate', 'no-auth-header')}")
+
 
             if probe.status_code == 401:
                 auth_header = probe.headers.get("WWW-Authenticate", "")
 
                 if "Digest" in auth_header:
-                    result = _try_digest_auth(ip, path, username, password)
+                    result = _try_digest_auth(ip, path, username, password, probe_body)
                 elif "Basic" in auth_header:
-                    result = _try_basic_auth(ip, path, username, password)
+                    result = _try_basic_auth(ip, path, username, password, probe_body)
                 else:
                     # 401 but no recognizable auth scheme, try both
-                    result = _try_digest_auth(ip, path, username, password)
+                    result = _try_digest_auth(ip, path, username, password, probe_body)
                     if not result:
-                        result = _try_basic_auth(ip, path, username, password)
+                        result = _try_basic_auth(ip, path, username, password, probe_body)
 
             elif probe.status_code == 200:
                 # Some endpoints return 200 on unauthenticated requests but still enforce auth on 
-                # sensitive operations. Try both auth methods, if credentials are wrong, the response content 
+                # sensitive operations. Try both auth methods, if credentials are wrong, the response body 
                 # will differ from unauthenticated
-                result = _try_digest_auth(ip, path, username, password)
+                result = _try_digest_auth(ip, path, username, password, probe_body)
                 if not result:
-                    result = _try_basic_auth(ip, path, username, password)
+                    result = _try_basic_auth(ip, path, username, password, probe_body)
 
             else:
                 # 403, 404, 500 etc. this path isn't useful, try next
@@ -783,11 +813,14 @@ def capture_frame(ip: str, stream_url: str, username: str, password: str,
 #run from root, [sudo] python -m tools.real.network_tools (-m= rul file as module from current dir)
 if __name__ == "__main__":
     # Step 1: scan the network
+    print(" ------ STEP 1 SCANNING NETWORK ------\n")
     hosts = scan_network("")
     
     # Step 2: feed each host into grab_banner
     for host in hosts:
+        
         banner_result = grab_banner(host["ip"], host["open_ports"])
+        print(f" ------ STEP 2 GRABBING BANNER FOR HOST: {host["ip"]} ------\n")
         print(banner_result)
 
         # Combine all banner strings for vendor fingerprinting
@@ -796,16 +829,21 @@ if __name__ == "__main__":
         print(f"[vendor] {host['ip']} → {vendor}")
 
         # Step 3: Check RTSP 
+        print(" \t------ STEP 3 CHECKING RTSP ------")
         rtsp_ports = [p for p in host["open_ports"] if p in [554, 8554, 37778]]
+        stream_url = None
         if rtsp_ports:
             for rtsp_port in rtsp_ports:
                 rtsp_result = check_rtsp(host["ip"], rtsp_port, vendor)
                 print(rtsp_result)
+                if rtsp_result["status"] == "open":
+                    stream_url = rtsp_result["stream_url"]  #RTSP URL!
+                    break
         else:
             print(f"[check_rtsp] {host['ip']} — no RTSP ports open, skipping")
 
         #step 4: test default_creds() 
-        
+        print(" \t------ STEP 4 TESTING DEFAULT CREDS ------")
         creds = get_credentials_for_vendor(vendor)
         valid_creds = None
         token = None
@@ -813,10 +851,12 @@ if __name__ == "__main__":
             result = test_credentials(host["ip"], username, password, vendor)
             print(result)
             if result["status"] == "success":
+                valid_creds = (username,password)
                 print(f"[!] VALID CREDENTIALS FOUND: {username}:{password} on {host['ip']}")
                 break  # stop testing once we have valid creds
 
          # Step 5: test capture frame if we have valid creds
+        print(" \t------ STEP 5 TESTING CAPTURE FRAME ------")
         if valid_creds:
             username, password = valid_creds
             capture_result = capture_frame(
@@ -830,6 +870,6 @@ if __name__ == "__main__":
             )
             print(capture_result)
 
-    # Direct RTSP test against local mediamtx instance
-    rtsp_result = check_rtsp("127.0.0.1", 8554, "generic_nvr")
-    print(rtsp_result)
+    # # Direct RTSP test against local mediamtx instance
+    # rtsp_result = check_rtsp("127.0.0.1", 8554, "generic_nvr")
+    # print(rtsp_result)

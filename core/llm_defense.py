@@ -54,7 +54,7 @@ INJECTION_KEYWORDS = [
 # ---------------------------------------------------------------------------
 # Defense functions
 # ---------------------------------------------------------------------------
-##EVAN YOU ARE HERE## 
+
 def your_sus_bro(content: str) -> tuple[bool, str]:
     """
     Heuristic check 
@@ -92,19 +92,9 @@ def wrap_for_llm(source: str, content: str, tag: str = "untrusted_data") -> str:
     """
     Wrap attacker-controlled content in XML tags before LLM ingestion.
 
-    The XML tags signal to the LLM that the enclosed content is external data
-    to be analyzed, not instructions to be followed. The source attribute
-    gives the LLM context about where the data came from.
-
-    WHY XML TAGS:
-        LLMs are trained to treat content inside XML-style tags as structured
-        data rather than free-form instructions. This is the standard mitigation
-        for prompt injection via attacker-controlled input, and is used by
-        Anthropic's own prompt engineering guidelines.
-
-        It is a soft control — a sufficiently adversarial or long injection
-        can still break through. The secondary model guard (TODO) is the
-        next layer for stronger enforcement.
+    The XML tags signal to the LLM that the enclosed content is external data to be analyzed, not 
+    instructions to be followed. The source attribute gives the LLM context about where the data 
+    came from. 
 
     Args:
         source:  Where the content came from — typically an IP address or

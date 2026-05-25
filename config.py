@@ -53,6 +53,17 @@ MOCK_NETWORK_FILE = os.path.join(DATA_DIR, "mock_network.json")
 MODE = os.getenv("MODE", "real").lower()
 
 
+
+
+# ---------------------------------------------------------------------------
+# Verbose mode
+# ---------------------------------------------------------------------------
+
+
+# Verbose mode prints detailed output from network_tools (banners, raw responses, etc.)
+# Set to True for debugging, False for clean pipeline output
+VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
+
 # ---------------------------------------------------------------------------
 # LLM models
 # ---------------------------------------------------------------------------

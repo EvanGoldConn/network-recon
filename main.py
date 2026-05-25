@@ -20,21 +20,10 @@ USAGE:
     python main.py --mock
 """
 
-import argparse
+
 import os
+import argparse
 from dotenv import load_dotenv
-
-# Import all agents to trigger @AgentRegistry.register decorators.
-# Order here doesn't matter — pipeline order is defined in AgentRegistry.PIPELINE_ORDER.
-from agents.wifi_agent import WiFiAgent
-from agents.osint_agent import OSINTAgent
-from agents.discovery_agent import DiscoveryAgent
-from agents.access_agent import AccessAgent
-from agents.lateral_agent import LateralMovementAgent
-from agents.reporting_agent import ReportingAgent
-
-from core.engagement import EngagementContext
-from core.pipeline import PipelineRunner
 
 
 def main():
@@ -63,11 +52,31 @@ def main():
         "--engagement-id",
         help="Custom engagement ID. Auto-generated if not provided."
     )
+    parser.add_argument(
+    "--verbose",
+    action="store_true",
+    default=False,
+    help="Enable verbose output from network tools (banners, raw responses, etc.)"
+    )
 
     args = parser.parse_args()
 
     if args.mock:
         os.environ["MODE"] = "mock"
+    if args.verbose:
+        os.environ["VERBOSE"] = "true"
+
+    # Import all agents to trigger @AgentRegistry.register decorators.
+    # Order here doesn't matter — pipeline order is defined in AgentRegistry.PIPELINE_ORDER.
+    from agents.wifi_agent import WiFiAgent
+    from agents.osint_agent import OSINTAgent
+    from agents.discovery_agent import DiscoveryAgent
+    from agents.access_agent import AccessAgent
+    from agents.lateral_agent import LateralMovementAgent
+    from agents.reporting_agent import ReportingAgent
+
+    from core.engagement import EngagementContext
+    from core.pipeline import PipelineRunner
 
     # Load or create engagement context
     if args.resume:
