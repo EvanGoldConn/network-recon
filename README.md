@@ -6,7 +6,7 @@ Autonomous LLM-powered security camera recon and exploitation pipeline. Built fo
 
 ## ⚠️ Legal Notice
 
-This tool is for networks you own or have **explicit written authorization** to test. Unauthorized use is illegal under the CFAA, UK Computer Misuse Act, and equivalent laws elsewhere. Don't be stupid with this.
+This tool is for networks you own or have **explicit written authorization** to test. Unauthorized use is illegal under the CFAA, UK Computer Misuse Act, and equivalent laws elsewhere.
 
 ---
 
