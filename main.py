@@ -58,6 +58,12 @@ def main():
     default=False,
     help="Enable verbose output from network tools (banners, raw responses, etc.)"
     )
+    parser.add_argument(
+    "--debug",
+    action="store_true",
+    default=False,
+    help="Enable debug output — raw banners, LLM prompts, internal state. Implies verbose."
+    )
 
     args = parser.parse_args()
 
@@ -65,6 +71,9 @@ def main():
         os.environ["MODE"] = "mock"
     if args.verbose:
         os.environ["VERBOSE"] = "true"
+    if args.debug:
+        os.environ["DEBUG"] = "true"
+        os.environ["VERBOSE"] = "true"  # debug implies verbose
 
     # Import all agents to trigger @AgentRegistry.register decorators.
     # Order here doesn't matter — pipeline order is defined in AgentRegistry.PIPELINE_ORDER.

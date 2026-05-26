@@ -1,5 +1,6 @@
 
 
+
 import os
 import json
 import socket
@@ -8,7 +9,7 @@ import subprocess #run external CLI programs
 from requests.auth import HTTPDigestAuth, HTTPBasicAuth
 import nmap
 import ssl #for SSL Wrapping for 443
-from config import DEFAULT_TIMEOUT, HTTP_TIMEOUT, SCAN_PORTS, NMAP_TIMEOUT, ARTIFACTS_DIR, VERBOSE
+from config import DEFAULT_TIMEOUT, HTTP_TIMEOUT, SCAN_PORTS, NMAP_TIMEOUT, ARTIFACTS_DIR, VERBOSE, DEBUG
 from core.vendors import (
     identify_vendor,
     identify_device_type,
@@ -58,7 +59,7 @@ def scan_network(network_range: str) -> list:
             s.close()
         # Convert e.g. "192.168.1.45" → "192.168.1.0/24"
         network_range = ".".join(local_ip.split(".")[:3]) + ".0/24" #get the first 3 octets and append /24 cidr.. majority of home & smb (small med biz) networks
-        print(f"[scan_network] Auto-detected subnet: {network_range}")
+        if VERBOSE: print(f"[scan_network] Auto-detected subnet: {network_range}") #VERBOSE
 
 
     nm = nmap.PortScanner()
@@ -67,17 +68,17 @@ def scan_network(network_range: str) -> list:
 
 
     # --- Step 2: Root path, ARP + SYN Scan ---
-    # ARP > ICMP — devices can't block ARP Reqs, and gives us MAC addresses.. feed into the OUI-based vendor fingerprinting.
+    # ARP > ICMP, devices can't block ARP Reqs, and gives us MAC addresses.. feed into the OUI-based vendor fingerprinting.
     
     if os.geteuid() == 0:
-        print("[scan_network] Running as root — using ARP discovery + SYN scan")
+        print("[scan_network] Running as root — using ARP discovery + SYN scan") #NORMAL
         try:
             nm.scan(
                 hosts=network_range,
                 arguments=f"-PR -sS -p {port_str} --host-timeout {NMAP_TIMEOUT}s"
             )
         except Exception as e:
-            print(f"[scan_network] Root scan failed: {e}")
+            print(f"[scan_network] Root scan failed: {e}") #NORMAL
             return results
         
         # ---------------------------------------------------------------------------------
@@ -108,14 +109,14 @@ def scan_network(network_range: str) -> list:
         # ---------------------------------------------------------------------------------
     
     else:
-        print("[scan_network] Non-root — skipping discovery, using -Pn TCP scan")
+        print("[scan_network] Non-root — skipping discovery, using -Pn TCP scan") #NORMAL
         try:
             nm.scan(
                 hosts=network_range,
                 arguments=f"-Pn -sT -p {port_str} --host-timeout {NMAP_TIMEOUT}s"
             )
         except Exception as e:
-            print(f"[scan_network] Non-root scan failed: {e}")
+            print(f"[scan_network] Non-root scan failed: {e}") #NORMAL
             return results
 
 
@@ -158,13 +159,13 @@ def scan_network(network_range: str) -> list:
                 "vendor": vendor,
             })
 
-            print(f"[scan_network] {ip} — ports: {open_ports}, vendor: {vendor}")
+            if VERBOSE: print(f"[scan_network] {ip} — ports: {open_ports}, vendor: {vendor}") #VERBOSE
 
         except Exception as e:
-            print(f"[scan_network] Failed to parse result for {ip}: {e}")
+            print(f"[scan_network] Failed to parse result for {ip}: {e}") #NORMAL
             continue
 
-    print(f"[scan_network] Done — {len(results)} live hosts found")
+    print(f"[scan_network] Done — {len(results)} live hosts found") #NORMAL
     return results
 
 def grab_banner(ip: str, open_ports: list = None) -> dict:
@@ -239,7 +240,8 @@ def grab_banner(ip: str, open_ports: list = None) -> dict:
                 # Read up to 1024 bytes — we only need the headers, not the body
             response = s.recv(1024).decode("utf-8", errors="ignore")
             banners[port] = response
-            if VERBOSE: print(f"\t\t [VERBOSE - grab_banner() - Probe Response] {ip}:{port} → {response[:200].strip()}")
+            if VERBOSE: print(f"[grab_banner] {ip}:{port} — {len(response)} bytes received") #VERBOSE
+            if DEBUG: print(f"[grab_banner] [DEBUG] {ip}:{port} raw response: {response[:500].strip()}") #DEBUG
             # ---------------------------------------------------------------------------
 
 
@@ -349,7 +351,7 @@ def check_rtsp(ip: str, port: int = 554, vendor: str = "generic_nvr") -> dict:
 
             s.send(request)
             response = s.recv(1024).decode("utf-8", errors="ignore")
-            if VERBOSE: print(f"\t\t[VERBOSE - check_rtsp() - Socket Response] {ip}:{port} trying {path} → {response[:100].strip()}")
+            if VERBOSE: print(f"[check_rtsp] {ip}:{port} trying {path} → {response[:80].strip()}") #VERBOSE
             # Any RTSP response (even 401) confirms the stream path exists
             # 401 means credentials required, which AccessAgent handles.
             if response.startswith("RTSP/1.0") or response.startswith("RTSP/1.1"):
@@ -604,7 +606,7 @@ def test_credentials(ip: str, username: str, password: str, vendor: str = "gener
             # This avoids guessing auth type
             probe = requests.get(url, timeout=HTTP_TIMEOUT)
             probe_body = probe.content  #Used for False Positive 200 return check in http auth, raw bytes
-            if VERBOSE: print(f"\t\t[VERBOSE - test_credentials() - HTTP Probe Response] {ip}{path} probe → {probe.status_code} {probe.headers.get('WWW-Authenticate', 'no-auth-header')}")
+            if VERBOSE: print(f"[test_credentials] {ip}{path} probe → {probe.status_code} {probe.headers.get('WWW-Authenticate', 'no-auth-header')}") #VERBOSE
 
 
             if probe.status_code == 401:
@@ -717,7 +719,7 @@ def capture_frame(ip: str, stream_url: str, username: str, password: str,
                 if ret and frame is not None:
                     cv2.imwrite(output_path, frame)
                     cap.release()
-                    print(f"[capture_frame] {ip} — RTSP capture saved to {output_path}")
+                    print(f"[capture_frame] {ip} — RTSP capture saved to {output_path}") #NORMAL
                     return {
                         "ip": ip,
                         "status": "captured",
@@ -726,10 +728,10 @@ def capture_frame(ip: str, stream_url: str, username: str, password: str,
                     }
 
             cap.release()
-            print(f"[capture_frame] {ip} — RTSP returned no valid frames, trying snapshot")
+            if VERBOSE: print(f"[capture_frame] {ip} — RTSP returned no valid frames, trying snapshot") #VERBOSE
 
         except Exception as e:
-            print(f"[capture_frame] {ip} — RTSP failed: {e}, trying snapshot")
+            if VERBOSE: print(f"[capture_frame] {ip} — RTSP failed: {e}, trying snapshot") #VERBOSE
 
     # --- Strategy 2: HTTP snapshot ---
     # Used when: RTSP disabled (Reolink default), RTSP failed, or no stream_url.
@@ -741,7 +743,7 @@ def capture_frame(ip: str, stream_url: str, username: str, password: str,
         # token comes from _try_reolink_json_auth() stored in test_credentials result.
         if "{token}" in snapshot_path:
             if not token:
-                print(f"[capture_frame] {ip} — Reolink snapshot requires token, none provided")
+                print(f"[capture_frame] {ip} — Reolink snapshot requires token, none provided") #NORMAL
                 return {
                     "ip": ip,
                     "status": "failed",
@@ -761,7 +763,7 @@ def capture_frame(ip: str, stream_url: str, username: str, password: str,
                 break
 
         if response is None:
-            print(f"[capture_frame] {ip} — snapshot endpoint returned no image")
+            if VERBOSE: print(f"[capture_frame] {ip} — snapshot endpoint returned no image") #VERBOSE
             return {
                 "ip": ip,
                 "status": "failed",
@@ -775,7 +777,7 @@ def capture_frame(ip: str, stream_url: str, username: str, password: str,
         frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
         if frame is None:
-            print(f"[capture_frame] {ip} — snapshot response was not a valid image")
+            if VERBOSE: print(f"[capture_frame] {ip} — snapshot response was not a valid image") #VERBOSE
             return {
                 "ip": ip,
                 "status": "failed",
@@ -784,7 +786,7 @@ def capture_frame(ip: str, stream_url: str, username: str, password: str,
             }
 
         cv2.imwrite(output_path, frame)
-        print(f"[capture_frame] {ip} — snapshot captured, saved to {output_path}")
+        print(f"[capture_frame] {ip} — snapshot captured, saved to {output_path}") #NORMAL
         return {
             "ip": ip,
             "status": "captured",
@@ -793,7 +795,7 @@ def capture_frame(ip: str, stream_url: str, username: str, password: str,
         }
 
     except Exception as e:
-        print(f"[capture_frame] {ip} — snapshot failed: {e}")
+        print(f"[capture_frame] {ip} — snapshot failed: {e}") #NORMAL
 
     # Both strategies failed
     return {

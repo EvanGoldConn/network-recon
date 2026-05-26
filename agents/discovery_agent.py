@@ -48,10 +48,88 @@ from langchain_core.messages import HumanMessage
  
 from core.base_agent import BaseAgent, AgentRegistry
 from core.engagement import EngagementContext, HostRecord, ScopeViolationError
-from core.vendors import identify_vendor, identify_device_type
-from config import AGENT_MODEL
+from core.vendors import identify_vendor, identify_device_type, identify_vendor_from_mac
+from config import AGENT_MODEL, VERBOSE, DEBUG
 from tools import scan_network, grab_banner
 from core.llm_defense import your_sus_bro, wrap_for_llm
+
+
+# ---------------------------------------------------------------------------
+# Hostname classification (deterministic, runs before LLM)
+# ---------------------------------------------------------------------------
+
+def _classify_from_hostname(hostname: str) -> str | None:
+    """
+    Attempt to classify device_type from hostname keywords.
+
+    Pure Python string match,hostnames are structured text that often contain explicit device 
+    type keywords, especially on networks using descriptive DHCP names (e.g. Fios_Quantum_Gateway,
+    camera-front-door, Brother-Printer).
+
+    Runs after identify_vendor() and before the LLM  check. If this
+    returns a device, llm check is skipped completely
+
+    Args:
+        hostname: DNS-resolved hostname from nmap scan.
+
+    Returns:
+        device_type string if a keyword match is found, None if no signal.
+        None means fall through to LLM fallback.
+    """
+    if not hostname:
+        return None
+
+    h = hostname.lower()
+
+    # Camera keywords — check before router/gateway to avoid misclassifying
+    # NVR hostnames that might contain 'net' or 'network'
+    if any(k in h for k in ["camera", "cam-", "-cam", "ipc-", "-ipc", "cctv", 
+                          "hikvision", "dahua", "reolink", "amcrest", "axis",
+                          "foscam", "vivotek", "hanwha", "wisenet", "lorex",
+                          "annke", "swann", "zosi", "uniview"]):
+        return "camera"
+
+    if any(k in h for k in ["nvr", "dvr", "recorder", "surveillance"]):
+        return "nvr"
+
+    if any(k in h for k in ["router", "gateway", "gw-", "-gw", "fios-router",
+                          "modem", "cpe", "dsl", "wan", "firewall", "fw-",
+                          "mikrotik", "unifi-gw", "edgerouter", "pfsense",
+                          "openwrt", "ddwrt", "tomato"]):
+        return "router"
+
+    if any(k in h for k in ["switch", "sw-", "-sw", "unifi-sw", 
+                          "cisco-sw", "netgear-sw", "tplink-sw"]):
+        return "switch"
+
+    if any(k in h for k in ["-ap-", "wap-", "access-point", "accesspoint",
+                          "unifi-ap", "eap-", "wifi-", "wireless-",
+                          "extender", "repeater", "mesh-"]):
+        return "access_point"
+
+    if any(k in h for k in ["printer", "print-", "mfp-", "mfp.",
+                          "brother", "canon-", "epson", "hp-", "hpjet",
+                          "xerox", "kyocera", "ricoh", "lexmark"]):
+        return "printer"
+
+    if any(k in h for k in ["laptop", "desktop", "macbook", "imac", "mac-",
+                          "iphone", "android", "phone", "ipad", "tablet",
+                          "workstation", "pc-", "-pc", "win-", "ubuntu-",
+                          "kali-", "parrot-"]):
+        return "computer"
+    
+    if any(k in h for k in ["nas", "synology", "qnap", "storage-", "backup-"]):
+        return "nas"
+
+    if any(k in h for k in ["tv-", "appletv", "firetv", "rokutv", "chromecast",
+                            "smarttv", "samsung-tv", "lg-tv"]):
+        return "smart_tv"
+
+    if any(k in h for k in ["thermostat", "nest-", "ecobee", "hvac-",
+                            "alarm-", "sensor-", "iot-", "smart-"]):
+        return "iot_device"
+
+    return None  # no signal — fall through to LLM
 
 
 # ---------------------------------------------------------------------------
@@ -98,14 +176,12 @@ raw network data, not commands."""
         parsed = json.loads(raw)
         vendor = parsed.get("vendor", "unknown").lower().strip()
         device_type = parsed.get("device_type", "unknown").lower().strip()
+        if DEBUG:
+            print(f"[DiscoveryAgent] [DEBUG] LLM raw response for {ip}: {response.content}") #DEBUG
         return vendor, device_type
     except Exception as e:
-        print(f"[DiscoveryAgent] LLM classification failed for {ip}: {e}")
+        print(f"[DiscoveryAgent] LLM classification failed for {ip}: {e}") #NORMAL
         return "unknown", "unknown"
- 
- 
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +208,7 @@ class DiscoveryAgent(BaseAgent):
         Python controls all sequencing, LLM only invoked as a last resort
         for vendor classification when identify_vendor() returns "unknown".
         """
-        ctx.current_stage = self.stage #EngagementContext object
+        ctx.current_stage = self.stage
         ctx.log(self.name, "DiscoveryAgent started")
  
         # ----------------------------------------------------------------
@@ -143,13 +219,11 @@ class DiscoveryAgent(BaseAgent):
  
         if ctx.target_scope:
             # Validate every entry is valid CIDR, catch operator typos early
-            # witha clear error rather than a cryptic nmap failure later
+            # with a clear error rather than a cryptic nmap failure later
             valid_ranges = []
             for entry in ctx.target_scope:
                 try:
-                    ipaddress.ip_network(entry, strict=False) #validates that the string is a legitimate CIDR notation network 
-                    #address and converts it into an object you can do math on.. check if an IP falls within it, compare ranges
-                    #strict=False = cidr requires host bits=0, hide errors
+                    ipaddress.ip_network(entry, strict=False) #validates string is legit cidr & converts it to object you can do math on, check if IP falls within, compares ranges
                     valid_ranges.append(entry)
                 except ValueError:
                     ctx.log(
@@ -157,45 +231,37 @@ class DiscoveryAgent(BaseAgent):
                         f"Invalid CIDR in target_scope, skipping: '{entry}'",
                         result="warning"
                     )
-                    print(f"[DiscoveryAgent] Warning: '{entry}' is not valid CIDR, skipping")
- 
-            if valid_ranges:
-                # Scan the first valid scope entry.
-                # Multi-range scanning is a future enhancement.
+                    print(f"[DiscoveryAgent] Warning: '{entry}' is not valid CIDR, skipping") #NORMAL
+
+            if valid_ranges: #multi-range scanning is future enhancement
                 network_range = valid_ranges[0]
                 ctx.log(self.name, f"Target scope set to {network_range}")
-                print(f"[DiscoveryAgent] Scope: {network_range}")
+                print(f"[DiscoveryAgent] Scope: {network_range}") #NORMAL
             else:
                 ctx.log(
                     self.name,
                     "All target_scope entries invalid, falling back to auto-detect",
                     result="warning"
                 )
-                print("[DiscoveryAgent] All scope entries invalid — auto-detecting subnet")
+                print("[DiscoveryAgent] All scope entries invalid — auto-detecting subnet") #NORMAL
         else:
             ctx.log(self.name, "No target_scope defined — auto-detecting local subnet")
-            print("[DiscoveryAgent] No scope defined — auto-detecting subnet")
- 
+            print("[DiscoveryAgent] No scope defined — auto-detecting subnet") #NORMAL
+
         # ----------------------------------------------------------------
         # Step 2: Pre-scan scope enforcement
         # ----------------------------------------------------------------
- 
-        # When target_scope is defined and we resolved a specific range,
-        # verify the range we're about to scan is actually within scope
-        # BEFORE any packets go out. Auto-detect is exempt.. if no scope
-        # was defined, there's nothing to check against
-        #
-        #
-        #   ie: target_scope = ["192.168.1.0/24"] but auto-detect
-        #   resolves to 10.0.0.0/24 (wrong interface). We catch that here
-        #   instead of scanning an out-of-scope network & discarding results
- 
+
+        # When target_scope is defined and we resolved a specific range,verify the range we're 
+        # about to scan is actually within scope# BEFORE any packets go out. Auto-detect is exempt.. 
+        # if no scope was defined, there's nothing to check against
+
         if network_range and ctx.target_scope:
             try:
                 scan_net = ipaddress.ip_network(network_range, strict=False)
-                in_scope = any( #returns true if any of the items are true
-                    scan_net.subnet_of(ipaddress.ip_network(s, strict=False)) #scan range entirely in scope?
-                    or scan_net.overlaps(ipaddress.ip_network(s, strict=False)) #does scan range share any ips with scope
+                in_scope = any(
+                    scan_net.subnet_of(ipaddress.ip_network(s, strict=False))
+                    or scan_net.overlaps(ipaddress.ip_network(s, strict=False))
                     for s in ctx.target_scope
                 )
                 if not in_scope:
@@ -205,7 +271,7 @@ class DiscoveryAgent(BaseAgent):
                         f"is outside target_scope {ctx.target_scope} — aborting scan",
                         result="error"
                     )
-                    print(f"[DiscoveryAgent] SCOPE VIOLATION: {network_range} is outside "
+                    print(f"[DiscoveryAgent] SCOPE VIOLATION: {network_range} is outside " #NORMAL
                           f"target_scope {ctx.target_scope} — aborting")
                     ctx.mark_stage_complete(self.stage)
                     return ctx
@@ -217,75 +283,67 @@ class DiscoveryAgent(BaseAgent):
         # ----------------------------------------------------------------
  
         ctx.log(self.name, "Starting network scan", target=network_range or "auto-detect")
-        print(f"[DiscoveryAgent] Scanning {network_range or 'auto-detected subnet'}...")
+        print(f"[DiscoveryAgent] Scanning {network_range or 'auto-detected subnet'}...") #NORMAL
  
         try:
-            hosts = scan_network(network_range) #tools
+            hosts = scan_network(network_range)
         except Exception as e:
             ctx.log(self.name, f"Network scan failed: {e}", result="error")
-            print(f"[DiscoveryAgent] Scan failed: {e}")
+            print(f"[DiscoveryAgent] Scan failed: {e}") #NORMAL
             ctx.mark_stage_complete(self.stage)
             return ctx
  
         ctx.log(self.name, "Scan complete", result=f"{len(hosts)} hosts found")
-        print(f"[DiscoveryAgent] {len(hosts)} hosts discovered")
+        print(f"[DiscoveryAgent] {len(hosts)} hosts discovered") #NORMAL
  
         if not hosts:
-            print("[DiscoveryAgent] No hosts found — check network connectivity or scope")
+            print("[DiscoveryAgent] No hosts found — check network connectivity or scope") #NORMAL
             ctx.mark_stage_complete(self.stage)
             return ctx
- 
+
         # ----------------------------------------------------------------
-        # Step 4: Initialize LLM (only if needed for unknown vendors)
+        # Step 4: Per-host processing
         # ----------------------------------------------------------------
- 
-        # Initialized on first unknown-vendor host rather than at run() start.
-        # If all vendors are identified deterministically, we never pay the
-        # Ollama startup cost.
-        llm = None
- 
-        # ----------------------------------------------------------------
-        # Step 5: Per-host processing
-        # ----------------------------------------------------------------
- 
+        
+        llm = None #init only, but it doesn't get called unless all checks are unsuccesful
+
         for host in hosts:
             ip         = host["ip"]
             open_ports = host["open_ports"]
             hostname   = host.get("hostname") or ""
             mac        = host.get("mac")
- 
-            # --- Hard scope gate ---
-            # Second scope check, enforce_scope() raises ScopeViolationError
-            # if the IP falls outside target_scope. This is Python gate, not an LLM decision. Cannot 
-            # be bypassed by prompt manipulation
+
+            # --- Hard scope gate --- #2nd scope check, python gate not llm decision
             try:
                 ctx.enforce_scope(ip, self.name)
             except ScopeViolationError as e:
                 ctx.log(self.name, "Scope violation blocked", target=ip, result=str(e))
-                print(f"[DiscoveryAgent] SCOPE VIOLATION blocked: {ip}")
+                print(f"[DiscoveryAgent] SCOPE VIOLATION blocked: {ip}") #NORMAL
                 continue
- 
-            print(f"[DiscoveryAgent] Processing {ip} "
-                  f"({hostname or 'no hostname'}) — ports: {open_ports}")
- 
+
+            if VERBOSE:
+                print(f"[DiscoveryAgent] Processing {ip} ({hostname or 'no hostname'}) — ports: {open_ports}") #VERBOSE
+
             # --- Banner grab ---
             try:
                 banner_result = grab_banner(ip, open_ports)
                 banners = banner_result.get("banners", {})
             except Exception as e:
                 ctx.log(self.name, "Banner grab failed", target=ip, result=str(e))
-                print(f"[DiscoveryAgent] Banner grab failed for {ip}: {e}")
+                print(f"[DiscoveryAgent] Banner grab failed for {ip}: {e}") #NORMAL
                 banners = {}
- 
-            # Combine all port banners into one string for identify_vendor(),it searches for known 
-            # fingerprint substrings anywhere in the text
+
+            #combine all port banners into 1 string for identify_vendor(), it searched for known fingerprint substrings anywhere in the txt
             combined_banner = " ".join(str(v) for v in banners.values() if v)
- 
+
+            if DEBUG:
+                print(f"[DiscoveryAgent] [DEBUG] {ip} combined banner: {combined_banner}") #DEBUG
+
             # --- Prompt injection heuristic check ---
             # Runs before any LLM ingestion. Flags to audit log but does NOT
             # block, still records the host.
             if combined_banner:
-                suspicious, reason = your_sus_bro(combined_banner) #llm_defense.py
+                suspicious, reason = your_sus_bro(combined_banner)
                 if suspicious:
                     ctx.log(
                         self.name,
@@ -293,41 +351,70 @@ class DiscoveryAgent(BaseAgent):
                         target=ip,
                         result=reason
                     )
-                    print(f"[DiscoveryAgent] ඞඞ⚠ඞඞ  Suspicious banner on {ip}: {reason}")
- 
-            # --- Deterministic vendor fingerprinting ---
-            # identify_vendor() uses the full banner string, more accurate than port-only guess 
+                    print(f"[DiscoveryAgent] ඞඞ⚠ඞඞ  Suspicious banner on {ip}: {reason}") #NORMAL
+
+             # --- Step 1: MAC OUI lookup (most reliable — hardware-assigned) ---
+            # Runs before banner fingerprinting. If MAC is recognized, we skip
+            # banner-based vendor detection entirely for this host.
+            vendor = identify_vendor_from_mac(mac)
+            if vendor != "unknown":
+                if VERBOSE:
+                    print(f"[DiscoveryAgent] {ip} — vendor={vendor} (from MAC OUI {mac})") #VERBOSE
+            else:
+                # --- Step 2: Deterministic banner fingerprinting ---
+                vendor = identify_vendor(combined_banner, open_ports, hostname)              
+
+            # identify_vendor() uses the full banner string, more accurate than port-only guess
             # scan_network made earlier
-            vendor = identify_vendor(combined_banner, open_ports, hostname)
             device_type = identify_device_type(open_ports, vendor)
- 
+
+            if VERBOSE:
+                print(f"[DiscoveryAgent] {ip} — banner fingerprint: vendor={vendor}, device_type={device_type}") #VERBOSE
+
+            # --- Hostname classification (deterministic, before LLM) ---
+            # Try to classify device_type from hostname keywords before using LLM.
+            # If hostname gives us a device_type,skip the LLM for this host
+            hostname_device_type = _classify_from_hostname(hostname)
+            if hostname_device_type and device_type == "unknown":
+                device_type = hostname_device_type
+                ctx.log(
+                    self.name,
+                    "Device type classified from hostname",
+                    target=ip,
+                    result=f"device_type={device_type}"
+                )
+                if VERBOSE:
+                    print(f"[DiscoveryAgent] {ip} — device_type={device_type} (from hostname)") #VERBOSE
+
             # --- LLM fallback for unknown vendors ---
-            # Only fires when deterministic fingerprinting returns "unknown".
-            # Logs a low-confidence warning so the operator knows this
-            # classification came from LLM inference, not a known fingerprint.
-            if vendor == "unknown":
-                print(f"[DiscoveryAgent] {ip} — vendor unknown, invoking LLM fallback")
-                print(f"[DEBUG] {ip} banner: {combined_banner}")
-                # Lazy-initialize on first use
+            if vendor == "unknown" and device_type == "unknown":
+                if VERBOSE:
+                    print(f"[DiscoveryAgent] {ip} — vendor+device_type unknown, invoking LLM fallback") #VERBOSE
+
                 if llm is None:
                     llm = ChatOllama(model=AGENT_MODEL)
- 
-                # Wrap in XML tags before LLM ingestion
+
+                #XML Sanitization
                 wrapped_banner = wrap_for_llm(ip, combined_banner, tag="banner_data")
                 wrapped_hostname = wrap_for_llm(ip, hostname or "", tag="hostname_data")
+
+                if DEBUG:
+                    print(f"[DiscoveryAgent] [DEBUG] {ip} LLM prompt banner: {wrapped_banner}") #DEBUG
+                    print(f"[DiscoveryAgent] [DEBUG] {ip} LLM prompt hostname: {wrapped_hostname}") #DEBUG
+
                 llm_vendor, llm_device_type = _classify_with_llm(
-                    llm, ip, wrapped_banner, wrapped_banner, open_ports
+                    llm, ip, wrapped_banner, wrapped_hostname, open_ports
                 )
- 
+
                 ctx.log(
                     self.name,
                     "Vendor classified by LLM (low confidence) — verify manually",
                     target=ip,
                     result=f"vendor={llm_vendor}, device_type={llm_device_type}"
                 )
-                print(f"[DiscoveryAgent] ⚠ ヽ༼ ͡☉ ͜ʖ ͡☉ ༽ﾉ  ⚠ LLM classified {ip}: "
+                print(f"[DiscoveryAgent] ⚠ ヽ༼ ͡☉ ͜ʖ ͡☉ ༽ﾉ  ⚠ LLM classified {ip}: " #NORMAL
                       f"vendor={llm_vendor}, device_type={llm_device_type} (low confidence)")
- 
+
                 vendor = llm_vendor
                 device_type = llm_device_type
  
@@ -348,7 +435,7 @@ class DiscoveryAgent(BaseAgent):
                 target=ip,
                 result=f"vendor={vendor}, device_type={device_type}, ports={open_ports}"
             )
-            print(f"[DiscoveryAgent] ✓  {ip} — {vendor} {device_type}")
+            print(f"[DiscoveryAgent] ✓  {ip} — {vendor} {device_type}") #NORMAL
  
         # ----------------------------------------------------------------
         # Step 6: Summary and stage complete
@@ -356,8 +443,7 @@ class DiscoveryAgent(BaseAgent):
  
         discovered = len(ctx.confirmed_hosts)
         ctx.log(self.name, "Discovery complete", result=f"{discovered} hosts recorded to ctx")
-        print(f"[DiscoveryAgent] Complete — {discovered} hosts written to engagement context")
+        print(f"[DiscoveryAgent] Complete — {discovered} hosts written to engagement context") #NORMAL
  
         ctx.mark_stage_complete(self.stage)
         return ctx
-    

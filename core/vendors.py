@@ -311,6 +311,123 @@ VENDOR_PROFILES = {
 # Fingerprinting logic
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# MAC OUI lookup (most reliable vendor signal — hardware-assigned)
+# ---------------------------------------------------------------------------
+ 
+# OUI (Organizationally Unique Identifier) = first 3 bytes of a MAC address.
+# Assigned by IEEE to manufacturers. Cannot be spoofed at Layer 2 on a LAN
+# without special tools, making this the most reliable vendor signal available.
+#
+# Format: "AA:BB:CC" (uppercase, colon-separated) → vendor_key
+#
+# Sources: IEEE MA-L registry (standards-oui.ieee.org/oui/oui.txt)
+# Only camera/NVR manufacturers included — this tool's target scope.
+# Router/computer OUIs intentionally omitted.
+#
+# TODO: For broader IoT coverage, pull full OUI list from:
+#   https://standards-oui.ieee.org/oui/oui.txt
+#   and filter against VENDOR_PROFILES keys at load time.
+ 
+CAMERA_OUI_MAP = { 
+    # --- Hikvision (Hangzhou Hikvision Digital Technology Co., Ltd.) ---
+    # One of the largest IP camera manufacturers globally, multiple OUI blocks
+    "C0:56:E3": "hikvision",
+    "44:19:B6": "hikvision",
+    "BC:AD:28": "hikvision",
+    "A4:14:37": "hikvision",
+    "54:C4:15": "hikvision",
+    "D0:C5:D3": "hikvision",
+    "28:57:BE": "hikvision",
+    "4C:BD:8F": "hikvision",
+    "68:CF:FE": "hikvision",
+ 
+    # --- Dahua Technology (Zhejiang Dahua Technology Co., Ltd.) ---
+    "90:02:A9": "dahua",
+    "E0:50:8B": "dahua",
+    "BC:32:B2": "dahua",
+    "40:62:31": "dahua",
+    "1C:98:EC": "dahua",
+    "70:81:05": "dahua",
+ 
+    # --- Axis Communications ---
+    # Swedish manufacturer, acquired by Canon
+    "00:40:8C": "axis",
+    "AC:CC:8E": "axis",
+    "B8:A4:4F": "axis",
+    "00:D0:1E": "axis",
+ 
+    # --- Hanwha Vision (formerly Samsung Techwin / Wisenet) ---
+    "00:09:18": "hanwha",
+    "00:16:6C": "hanwha",
+    "14:1A:3A": "hanwha",
+    "F8:A6:D9": "hanwha",
+ 
+    # --- Reolink (Shenzhen Reolink Technology Co., Ltd.) ---
+    "B4:FB:E4": "reolink",
+    "EC:71:DB": "reolink",
+    "78:65:68": "reolink",
+ 
+    # --- Amcrest (OEM Dahua, but may have own OUI blocks) ---
+    "B8:26:D4": "amcrest",
+ 
+    # --- Uniview (Zhejiang Uniview Technologies) ---
+    "00:24:75": "uniview",
+    "6C:E2:B4": "uniview",
+ 
+    # --- Vivotek ---
+    "00:02:D1": "vivotek",
+    "AC:A2:13": "vivotek",
+ 
+    # --- Bosch Security Systems ---
+    "00:03:93": "bosch",
+    "00:10:EF": "bosch",
+ 
+    # --- Foscam ---
+    "C4:D9:87": "foscam",
+    "E0:62:90": "foscam",
+}
+ 
+ 
+def identify_vendor_from_mac(mac: str) -> str:
+    """
+    Identify vendor from MAC address OUI (first 3 bytes).
+ 
+    This is the most reliable vendor signal available — OUI assignments
+    are hardware-level and cannot be manipulated by firmware or banners.
+    Called BEFORE banner-based identify_vendor() in the discovery pipeline.
+ 
+    Args:
+        mac: MAC address string in any common format:
+             "AA:BB:CC:DD:EE:FF", "AA-BB-CC-DD-EE-FF", or "AABBCCDDEEFF"
+             Case-insensitive.
+ 
+    Returns:
+        Vendor key from VENDOR_PROFILES if OUI is recognized, "unknown" otherwise.
+    """
+    if not mac:
+        return "unknown"
+ 
+    # Normalize to uppercase colon-separated format
+    mac_clean = mac.upper().replace("-", ":").replace(".", ":")
+ 
+    # Handle formats without separators (AABBCCDDEEFF → AA:BB:CC:DD:EE:FF)
+    if ":" not in mac_clean and len(mac_clean) == 12:
+        mac_clean = ":".join(mac_clean[i:i+2] for i in range(0, 12, 2))
+ 
+    # Extract OUI — first 3 octets
+    parts = mac_clean.split(":")
+    if len(parts) < 3:
+        return "unknown"
+ 
+    oui = ":".join(parts[:3])
+    return CAMERA_OUI_MAP.get(oui, "unknown")
+
+# --------------------------------------------------------------------------------
+
+
+
 def identify_vendor(banner: str, open_ports: list, hostname: str = "") -> str:
     """
     Identify the most likely vendor from available evidence.

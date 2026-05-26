@@ -61,8 +61,17 @@ MODE = os.getenv("MODE", "real").lower()
 
 
 # Verbose mode prints detailed output from network_tools (banners, raw responses, etc.)
-# Set to True for debugging, False for clean pipeline output
+# Set to True for more information, False for clean pipeline output
 VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
+
+# ---------------------------------------------------------------------------
+# Debug mode
+# ---------------------------------------------------------------------------
+
+
+# Debug mode prints excessively detailed output
+# Set to True for debugging, False for clean pipeline output
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
 # ---------------------------------------------------------------------------
 # LLM models
