@@ -4,14 +4,6 @@ core/engagement.py
 The EngagementContext is the single shared intelligence object that flows
 through the entire attack chain. Every agent reads from it and writes to it.
 
-WHY THIS EXISTS:
-    Without a shared context object, agents pass strings between each other.
-    That works for two agents but breaks down at scale — agent 5 has no idea
-    what agents 1-4 found, and there's no audit trail of actions taken.
-
-    EngagementContext solves this by being the single source of truth for
-    everything discovered, everything attempted, and everything achieved
-    during an engagement.
 
 DESIGN PRINCIPLES:
     1. Append-only for most fields (hosts, credentials, artifacts)
@@ -115,6 +107,36 @@ class AuditEntry:
 
 
 @dataclass
+class CVERecord:
+    """
+    Represents a CVE finding associated with a discovered host.
+
+    Populated by: ReportingAgent (from vendors.py known_cves),
+                  OSINTAgent (future.. NVD API lookup)
+    Consumed by: ReportingAgent
+
+    WHY THIS EXISTS:
+        Linking CVEs to specific hosts makes the report actionable.
+        "192.168.1.10 is vulnerable to CVE-2017-7921 (Critical)
+        Hikvision authentication bypass, confirmed exploited" is a
+        finding. A list of CVE IDs is not.
+
+    SOURCE VALUES:
+        "vendors.py"  — known CVEs from static vendor profile
+        "nvd_api"     — fetched from NVD at scan time (future)
+        "osint_agent" — discovered via Shodan/OSINT (future)
+    """
+    ip: str
+    cve_id: str                            # e.g. "CVE-2017-7921"
+    vendor: str                            # e.g. "hikvision"
+    description: str                       # short human-readable description
+    severity: str                          # "critical"/"high"/"medium"/"low"
+    exploited: bool = False                # True if we confirmed access on this host
+    source: str = "vendors.py"            # where this finding came from
+    discovered_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+@dataclass
 class EngagementContext:
     """
     The single shared intelligence object for an entire engagement.
@@ -168,6 +190,7 @@ class EngagementContext:
     credentials_found: list = field(default_factory=list)    # list of CredentialRecord
     artifacts: list = field(default_factory=list)            # list of ArtifactRecord
     exposed_services: list = field(default_factory=list)     # from OSINT/Shodan stage
+    cve_findings: list = field(default_factory=list)         # list of CVERecord
 
     # --- Audit trail ---
     audit_log: list = field(default_factory=list)            # list of AuditEntry
@@ -243,6 +266,12 @@ class EngagementContext:
         """Add an externally exposed service found via OSINT."""
         self.exposed_services.append(service)
 
+    def add_cve_finding(self, cve: CVERecord):
+        """Add a CVE finding. Deduplicates by ip + cve_id pair."""
+        existing = [(c["ip"], c["cve_id"]) for c in self.cve_findings]
+        if (cve.ip, cve.cve_id) not in existing:
+            self.cve_findings.append(cve.__dict__)
+
     def log(self, agent: str, action: str, target: str = None, result: str = None):
         """Append to the chain of custody audit log."""
         entry = AuditEntry(agent=agent, action=action, target=target, result=result)
@@ -284,6 +313,7 @@ class EngagementContext:
             f"Hosts discovered: {len(self.confirmed_hosts)}\n"
             f"Credentials found: {len(self.credentials_found)}\n"
             f"Artifacts captured: {len(self.artifacts)}\n"
+            f"CVE findings: {len(self.cve_findings)}\n"
             f"Audit entries: {len(self.audit_log)}\n"
         )
 

@@ -47,10 +47,13 @@ class ReportingAgent(BaseAgent):
     requires_network = False
     requires_llm = True
 
-    def run(self, ctx: EngagementContext) -> EngagementContext:
-        raise NotImplementedError("ReportingAgent.run() — implementation pending")
-
+    
     def can_run(self, ctx: EngagementContext) -> tuple[bool, str]:
         if not ctx.confirmed_hosts and not ctx.exposed_services:
             return False, "Nothing to report. Run at least one discovery stage first."
         return True, ""
+
+    def run(self, ctx: EngagementContext) -> EngagementContext:
+        raise NotImplementedError("ReportingAgent.run() — implementation pending")
+
+    
