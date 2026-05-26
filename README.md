@@ -1,5 +1,5 @@
-# LLM-Driven Network Recon & IoT Exploitation Framework
-
+# ~~LLM-Driven Network Recon & IoT Exploitation Framework~~
+# CameraC3racker
 Autonomous LLM-powered security camera recon and exploitation pipeline. Built for authorized pen-testing on networks you own or have permission to test.
 
 ---
