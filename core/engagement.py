@@ -42,6 +42,9 @@ class HostRecord:
     vendor: Optional[str] = None           # "Hikvision", "Dahua", "Axis", etc.
     banner: Optional[str] = None           # raw banner text, sanitized before LLM ingestion
     os_fingerprint: Optional[str] = None
+    source: str = "discovery"              # "discovery" = found by DiscoveryAgent internal scan
+                                           # "osint"     = found by OSINTAgent via Shodan (externally exposed)
+                                           # "wifi"      = found after WiFiAgent gained network access
     discovered_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
@@ -184,6 +187,21 @@ class EngagementContext:
     entry_method: Optional[str] = None    # "wifi_crack", "given_access", "vpn", "shodan_exposed"
     wifi_ssid: Optional[str] = None
     wifi_passphrase: Optional[str] = None  # populated by WiFiModule if cracked
+
+    # --- External engagement target (future: org-based recon) ---
+    # Used by OSINTAgent Phase 2 when targeting a named organization rather than
+    # a known IP range. OSINTAgent will resolve these to CIDRs via ARIN/BGP lookup
+    # and add them to target_scope automatically.
+    # Currently stubbed, set via --org, --domain, --address CLI flags (future).
+    target_org: Optional[str] = None      # e.g. "Acme Corp" — used for Shodan org: filter + ARIN lookup
+    target_domain: Optional[str] = None   # e.g. "acmecorp.com" — used for cert transparency + DNS recon
+    target_address: Optional[str] = None  # e.g. "Newark NJ" — used to geo-filter Shodan results to physical site
+
+    # --- Public IP (populated by OSINTAgent) ---
+    # The WAN IP Shodan sees for this network. RFC1918 target_scope won't be indexed
+    # by Shodan — OSINTAgent resolves the public-facing IP via api.myip() and stores
+    # it here so it's available to ReportingAgent and LateralMovementAgent.
+    public_ip: Optional[str] = None
 
     # --- Discovered intelligence ---
     confirmed_hosts: list = field(default_factory=list)      # list of HostRecord
@@ -346,14 +364,17 @@ class EngagementContext:
 
     def summary(self) -> str:
         """Human-readable summary of engagement progress."""
+        osint_hosts = [h for h in self.confirmed_hosts if h.get("source") == "osint"]
         return (
             f"Engagement: {self.engagement_id}\n"
             f"Scope: {', '.join(self.target_scope) or 'auto-detect'}\n"
+            f"Public IP: {self.public_ip or 'unknown'}\n"
             f"Stages complete: {', '.join(self.stages_completed) or 'none'}\n"
-            f"Hosts discovered: {len(self.confirmed_hosts)}\n"
+            f"Hosts discovered: {len(self.confirmed_hosts)} ({len(osint_hosts)} from OSINT)\n"
             f"Credentials found: {len(self.credentials_found)}\n"
             f"Artifacts captured: {len(self.artifacts)}\n"
             f"CVE findings: {len(self.cve_findings)}\n"
+            f"Exposed services: {len(self.exposed_services)}\n"
             f"Audit entries: {len(self.audit_log)}\n"
         )
 

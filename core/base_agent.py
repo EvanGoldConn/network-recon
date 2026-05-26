@@ -3,16 +3,6 @@ core/base_agent.py
 ------------------
 The abstract base class that every agent in the pipeline inherits from.
 
-WHY A BASE CLASS:
-    Without a shared interface, every agent is a snowflake. Adding a new
-    agent means understanding how the existing ones work. With a base class,
-    the contract is explicit: every agent takes an EngagementContext, runs,
-    and returns an updated EngagementContext. That's it.
-
-    This is what makes the pipeline composable. The pipeline runner doesn't
-    need to know anything about what an agent does — just that it conforms
-    to this interface.
-
 INHERITANCE PATTERN:
     class MyNewAgent(BaseAgent):
         name = "MyNewAgent"
@@ -171,26 +161,44 @@ class AgentRegistry:
         """
         Get agent classes in pipeline order.
 
+        TWO BEHAVIORS depending on whether stages are explicitly provided:
+
+        No stages (run_all):
+            Returns all registered agents sorted by PIPELINE_ORDER.
+            This is the canonical default — agents run in the designed sequence.
+
+        Explicit stages (--stages discovery osint):
+            Returns agents in EXACTLY the order the operator specified.
+            PIPELINE_ORDER is NOT applied. This allows deliberate reordering 
+            (e.g. discovery before osint for CVE enrichment) without fighting the default sort.
+
         Args:
-            stages: Optional list of stage names to include.
-                    If None, returns all registered agents in order.
+            stages: Optional list of stage names to include, in desired order.
+                    If None, returns all registered agents in PIPELINE_ORDER.
 
         Returns:
-            List of agent classes in pipeline execution order.
+            List of agent classes in the appropriate execution order.
         """
         if stages:
-            requested = set(stages)
-        else:
-            requested = set(cls._registry.keys())
+            # Explicit order (respect exactly what the operator passed).
+            # Skip any stage names that aren't registered (typo protection).
+            ordered = []
+            for stage in stages:
+                if stage in cls._registry:
+                    ordered.append(cls._registry[stage])
+                else:
+                    print(f"[Pipeline] Warning: unknown stage '{stage}' — skipping")
+            return ordered
 
+        # No explicit stages — use canonical PIPELINE_ORDER for run_all()
         ordered = []
         for stage in cls.PIPELINE_ORDER:
-            if stage in requested and stage in cls._registry:
+            if stage in cls._registry:
                 ordered.append(cls._registry[stage])
 
         # Any registered agents not in PIPELINE_ORDER go at the end
         for stage, agent_class in cls._registry.items():
-            if stage not in cls.PIPELINE_ORDER and stage in requested:
+            if stage not in cls.PIPELINE_ORDER:
                 ordered.append(agent_class)
 
         return ordered

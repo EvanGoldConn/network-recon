@@ -4,7 +4,7 @@
 
 ## Completed Work
 
-### Session 1 — Prior Session (stage-3)
+### Session 
 * [x] Built mock mode pipeline end-to-end (agents, tools, reporting)
 * [x] Implemented `tools/mock/network_tools.py` — reads `mock_network.json`
 * [x] Built `data/mock_network.json` — 6-device simulated network
@@ -12,7 +12,7 @@
 * [x] Working `agents/access_agent.py` (pre-refactor, stage-3 only)
 * [x] Verified mock pipeline runs end-to-end in stage-3
 
-### Session 3 — Stealth / Evasion + Real Hardware Baseline
+### Session Stealth / Evasion + Real Hardware Baseline
 * [x] Added `--quiet` master flag + 6 granular stealth flags (`--slow-scan`, `--fragment`, `--decoys`, `--spoof-source-port`, `--randomize-hosts`, `--spoof-mac`)
 * [x] `--quiet` fans out to all granular flags; granular flags also work independently
 * [x] Stealth nmap args built in `scan_network()` — T1 timing, fragmentation, decoys, source port spoof, randomized host order
@@ -32,6 +32,27 @@
 * [x] Created GitHub private repo: `https://github.com/EvanGoldConn/network-recon`
 * [x] Configured SSH key for GitHub authentication
 * [x] Initial commit and push to GitHub
+
+### Session OSINTAgent + Pipeline Order Fix
+* [x] Implemented `agents/osint_agent.py` fully
+  * Phase 1: public IP resolution via ipify.org (free, no Shodan credits)
+  * Phase 2/3: Shodan host lookup via `api.host()` (single IP) or `api.search(net:)` (CIDR)
+  * Phase 4: CVE enrichment loop against all confirmed hosts, skips private IPs cleanly
+  * Phase 5: all Shodan findings written to `ctx.exposed_services`
+  * Camera/NVR detection via port + banner signature matching
+  * Shodan-found hosts added to `ctx.confirmed_hosts` with `source="osint"`
+  * CVE records normalized from Shodan vuln data, CVSS mapped to severity bucket
+* [x] Added `source` field to `HostRecord` ("discovery" / "osint" / "wifi")
+* [x] Added `public_ip` field to `EngagementContext`, populated by OSINTAgent
+* [x] Added stub fields to `EngagementContext`: `target_org`, `target_domain`, `target_address` for future org-based recon
+* [x] Added `--org`, `--domain`, `--address` CLI flags (stubbed, wired to ctx)
+* [x] Fixed `AgentRegistry.get_pipeline()` to respect explicit `--stages` order
+  * Previously always sorted by `PIPELINE_ORDER` regardless of what was passed
+  * Now: explicit stages run in operator-specified order, `PIPELINE_ORDER` only applies to `run_all()`
+* [x] Updated `summary()` to show public IP and OSINT host count separately
+* [x] Purchased Shodan Membership ($49 one-time)
+* [x] Confirmed full pipeline real run: discovery + osint + camera_access + reporting on live network
+
 
 #### Framework (Layer 1 — core/)
 * [x] Built `core/engagement.py` — `EngagementContext` dataclass
@@ -123,31 +144,31 @@ Get the tools layer complete and consistent before touching agents.
 ### Phase 2 — Core Agents
 Makes the pipeline runnable end-to-end.
 
-* [ ] 3. Implement `agents/discovery_agent.py` `run()`
+* [x] 3. Implement `agents/discovery_agent.py` `run()`
   * LangChain + Ollama (`qwen2.5:7b`)
   * Calls `scan_network` + `grab_banner`
   * Auto-detects subnet if `ctx.target_scope` is empty
   * Sanitizes banners before LLM ingestion (XML tag wrapping)
   * Writes `HostRecord` entries to `ctx`
-* [ ] 4. Implement `agents/access_agent.py` `run()`
+* [x] 4. Implement `agents/access_agent.py` `run()`
   * LangChain + Claude Haiku (`claude-haiku-4-5-20251001`)
   * Calls `check_rtsp` + `test_credentials`
   * Tries `ctx.credentials_found` first before vendor defaults (credential reuse)
   * Frame capture via opencv — saves JPEG to `results/` as proof of access
   * Writes `CredentialRecord` and `ArtifactRecord` entries to `ctx`
-* [ ] 5. End-to-end mock test — `python main.py --mock`
-* [ ] 6. End-to-end real test — `python main.py` against home network
+* [x] 5. End-to-end mock test — `python main.py --mock`
+* [x] 6. End-to-end real test — `python main.py` against home network
 
 ---
 
 ### Phase 3 — Hardening
 Security and reliability before expanding capability.
 
-* [ ] 7. Input sanitization — wrap banner content in XML tags before passing to LLM
+* [x] 7. Input sanitization — wrap banner content in XML tags before passing to LLM
   * `<banner_data source="192.168.1.10">Hikvision-Webs</banner_data>`
   * Signals to LLM that content is data, not instructions
   * Defense against prompt injection via malicious camera banners
-* [ ] 8. Scope enforcement test — write a test that verifies `enforce_scope()` raises
+* [x] 8. Scope enforcement test — write a test that verifies `enforce_scope()` raises
   `ScopeViolationError` for out-of-scope IPs and never makes a network connection
 * [ ] 9. Results encryption — implement Fernet symmetric encryption on `results/` output
   * `cryptography` library already installed
@@ -159,13 +180,13 @@ Security and reliability before expanding capability.
 ### Phase 4 — Remaining Agents
 Expand pipeline to full recon + reporting capability.
 
-* [ ] 10. Implement `agents/osint_agent.py` `run()` ← NEXT
+* [x] 10. Implement `agents/osint_agent.py` `run()`
   * Shodan API integration (`shodan` library already installed)
   * Query for internet-exposed cameras/NVRs by IP range or org name
   * CVE lookup for identified device models
   * Feeds `ctx.exposed_services`
   * Requires `SHODAN_API_KEY` in `.env`
-* [ ] 11. Implement `agents/reporting_agent.py` `run()`
+* [x]11. Implement `agents/reporting_agent.py` `run()`
   * LangChain + Claude Sonnet
   * Reads full `ctx` — hosts, credentials, artifacts, audit log
   * Auto-maps findings to MITRE ATT&CK using agent `mitre_tactic` fields
@@ -186,12 +207,7 @@ Expand pipeline to full recon + reporting capability.
 ### Phase 5 — WiFi Initial Access
 Requires Alfa AWUS036ACM hardware + Kali Linux UTM VM.
 
-* [ ] 13. Set up Kali Linux UTM VM with USB passthrough for Alfa adapter
-  * UTM settings: add USB device passthrough for Alfa adapter
-  * Verify in Kali: `iwconfig` shows adapter
-  * Enable monitor mode: `sudo airmon-ng start wlan0`
-  * Install tools: `apt install hcxdumptool hcxtools hashcat aircrack-ng`
-* [ ] 14. Implement `agents/wifi_agent.py` `run()`
+* [ ] 13. Implement `agents/wifi_agent.py` `run()` ← NEXT
   * Phase 1: scan for nearby networks, present targets to operator
   * Phase 2: PMKID capture via hcxdumptool (preferred, no client needed)
   * Phase 2 fallback: 4-way handshake capture via airodump-ng + deauth
@@ -215,18 +231,18 @@ Requires Alfa AWUS036ACM hardware + Kali Linux UTM VM.
 ## Hardware
 
 * [x] Alfa AWUS036ACM ordered (eBay — myneedlestore_intl, $47.99)
-* [ ] Alfa AWUS036ACM arrived and confirmed working
+* [x] Alfa AWUS036ACM arrived
+* [x] Kali Linux UTM VM created and configured
+* [ ] USB passthrough confirmed working for Alfa adapter in UTM
   * Test: plug into Mac USB, then UTM VM USB passthrough
   * Verify: `system_profiler SPUSBDataType | grep -A 5 "AWUS\|MT7612\|MediaTek"`
   * Verify in Kali: `iwconfig` shows adapter in monitor mode
-* [ ] Kali Linux UTM VM created and configured
-* [ ] USB passthrough configured for Alfa adapter in UTM settings
 
 ---
 
 ## Future Extensions (Post Phase 6)
 
-* [ ] Shodan Membership ($69/year) — needed for full results and CVE data
+* [ ] Shodan Membership purchased ($49 one-time) — org-based recon (--org/--domain/--address) not yet implemented, needs Phase 2 of OSINTAgent
 * [ ] RTSP stream path fuzzing — per-vendor path lists already in `vendors.py`,
   need automated fuzzer for unknown vendors
 * [ ] CVE-specific exploit modules — Hikvision CVE-2021-36260 (RCE),

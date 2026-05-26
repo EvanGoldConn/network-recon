@@ -121,6 +121,22 @@ def main():
         help="Spoof MAC address of scanning interface before scan, restore after. Layer 2 only. Requires root."
     )
 
+    # --- External engagement target (future: org-based recon) ---
+    # These feed OSINTAgent Phase 2 — ARIN lookup, BGP/ASN resolution,
+    # geolocation filtering. Currently stubbed in ctx, not yet implemented in OSINTAgent.
+    parser.add_argument(
+        "--org",
+        help="Target organization name for Shodan org: filter and ARIN lookup. e.g. 'Acme Corp'"
+    )
+    parser.add_argument(
+        "--domain",
+        help="Target domain for certificate transparency and DNS recon. e.g. 'acmecorp.com'"
+    )
+    parser.add_argument(
+        "--address",
+        help="Target physical location to geo-filter Shodan results. e.g. 'Newark NJ'"
+    )
+
     args = parser.parse_args()
 
     if args.mock:
@@ -180,15 +196,24 @@ def main():
             ctx = EngagementContext(
                 engagement_id=args.engagement_id,
                 target_scope=args.scope or [],
+                target_org=args.org or None,
+                target_domain=args.domain or None,
+                target_address=args.address or None,
             )
         else: #if no engagementID defined, it will just auto-generate one within the EngagementContext class
             ctx = EngagementContext(
                 target_scope=args.scope or [],
-        )
+                target_org=args.org or None,
+                target_domain=args.domain or None,
+                target_address=args.address or None,
+            )
 
     print(f"\n[Main] Engagement ID: {ctx.engagement_id}")
     print(f"[Main] Mode: {os.getenv('MODE', 'real')}")
     print(f"[Main] Scope: {ctx.target_scope or 'auto-detect'}")
+    if ctx.target_org:      print(f"[Main] Target org: {ctx.target_org}")
+    if ctx.target_domain:   print(f"[Main] Target domain: {ctx.target_domain}")
+    if ctx.target_address:  print(f"[Main] Target address: {ctx.target_address}")
 
     # Log active stealth settings to audit trail before any agent runs.
     # This ensures chain of custody includes evasion config for the report.

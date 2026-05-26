@@ -40,7 +40,7 @@ network-recon/
 │   ├── lateral_agent.py       # Stage 4: credential reuse, NVR pivot (stub)
 │   ├── reporting_agent.py     # Stage 5: PDF + Markdown report generation
 │   ├── wifi_agent.py          # Stage 0: WPA crack (Kali only, stub)
-│   └── osint_agent.py         # Stage 1: Shodan recon (needs API key, stub)
+│   └── osint_agent.py         # Stage 1: Shodan recon, public IP detection, CVE enrichment
 │
 ├── tools/
 │   ├── __init__.py            # Swaps real vs mock based on MODE in .env
@@ -107,10 +107,15 @@ sudo python main.py --verbose
 
 # Flags
 --scope 192.168.1.0/24     # explicit scope
---stages discovery access  # run specific stages only
+--stages discovery osint   # run specific stages in the order given
 --engagement-id my-test    # custom engagement ID
 --no-report                # skip report generation
 --resume results/engagement-xyz.json
+
+# External engagement targeting (OSINTAgent Phase 2, not yet implemented)
+--org "Acme Corp"          # target org name for Shodan org: filter + ARIN lookup
+--domain acmecorp.com      # target domain for cert transparency recon
+--address "Newark NJ"      # physical location to geo-filter Shodan results
 
 # Stealth / evasion (real mode only — no effect in mock)
 --quiet                    # enable all stealth options at once
@@ -145,9 +150,9 @@ sudo python main.py --verbose
 | CameraAccessAgent (creds, RTSP, frame capture) | ✅ |
 | ReportingAgent (CVE mapping, LLM writing, PDF) | ✅ |
 | Stealth/evasion flags (--quiet + granular) | ✅ |
+| OSINTAgent (Shodan lookup, CVE enrichment, public IP detection) | ✅ |
 | LateralMovementAgent | 🔧 stub |
-| WiFiAgent | 🔧 stub (Kali only) |
-| OSINTAgent | 🔧 stub (needs Shodan key) |
+| WiFiAgent | 🔧 in progress (Kali only) |
 
 ---
 
