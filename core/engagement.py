@@ -282,6 +282,46 @@ class EngagementContext:
             self.stages_completed.append(stage)
         self.current_stage = None
 
+    def log_stealth_config(self):
+        """
+        Write the active stealth/evasion settings to the audit log at scan start.
+
+        WHY THIS IS IN THE AUDIT LOG:
+            "Scan ran with MACspoofing and decoy IPs" is material to the report and chain of custody.
+            Logging it here means it's automatically included in report generation
+            without any agent having to remember to write it.
+
+        Called by: PipelineRunner before the first stage, or by DiscoveryAgent
+                   at the start of its run(). Either location is fine, it happens once per engagement, early.
+        """
+        # Import here to avoid circular import — config imports nothing from core/
+        from config import (
+            QUIET, SLOW_SCAN, FRAGMENT_PACKETS, USE_DECOYS,
+            SPOOF_SOURCE_PORT, RANDOMIZE_HOSTS, SPOOF_MAC
+        )
+
+        active_flags = []
+        if QUIET:             active_flags.append("quiet (all stealth options)")
+        if SLOW_SCAN:         active_flags.append("slow-scan (-T1)")
+        if FRAGMENT_PACKETS:  active_flags.append("fragment-packets (-f)")
+        if USE_DECOYS:        active_flags.append("decoys (-D RND:5)")
+        if SPOOF_SOURCE_PORT: active_flags.append("spoof-source-port (--source-port 53)")
+        if RANDOMIZE_HOSTS:   active_flags.append("randomize-hosts")
+        if SPOOF_MAC:         active_flags.append("spoof-mac")
+
+        if active_flags:
+            self.log(
+                agent="Pipeline",
+                action=f"Stealth mode active — flags: {', '.join(active_flags)}",
+                result="evasion options applied to scan"
+            )
+        else:
+            self.log(
+                agent="Pipeline",
+                action="Stealth mode inactive — standard scan settings",
+                result="no evasion options active"
+            )
+
     # ----------------------------------------------------------------
     # Serialization
     # ----------------------------------------------------------------

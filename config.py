@@ -79,6 +79,44 @@ DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 NO_REPORT = os.getenv("NO_REPORT", "false").lower() == "true"
 
 # ---------------------------------------------------------------------------
+# Stealth / evasion configuration
+# ---------------------------------------------------------------------------
+
+# Master quiet flag. If True, all stealth sub-options below are enabled.
+# Equivalent to passing every granular flag at once.
+# Set via --quiet CLI flag; individual sub-flags can also be set independently.
+QUIET = os.getenv("QUIET", "false").lower() == "true"
+
+# Drop nmap timing to T1 (sneaky), 15s inter-probe delay.
+# Dramatically slower but blends into background noise.
+SLOW_SCAN = os.getenv("SLOW_SCAN", "false").lower() == "true"
+
+# Fragment TCP probes into 8-byte chunks (-f).
+# Defeats older IDS signatures that match on full packet payloads.
+# Requires root.
+FRAGMENT_PACKETS = os.getenv("FRAGMENT_PACKETS", "false").lower() == "true"
+
+# Send probes from 5 randomly spoofed decoy IPs alongside your real one (-D RND:5).
+# IDS sees 6 source IPs, can't confidently attribute. Requires root.
+USE_DECOYS = os.getenv("USE_DECOYS", "false").lower() == "true"
+
+# Spoof source port to 53 (DNS), some firewalls whitelist DNS source ports.
+SPOOF_SOURCE_PORT = os.getenv("SPOOF_SOURCE_PORT", "false").lower() == "true"
+
+# Randomize host scan order instead of sequential .1/.2/.3...
+# Sequential scanning is a classic IDS trigger pattern.
+RANDOMIZE_HOSTS = os.getenv("RANDOMIZE_HOSTS", "false").lower() == "true"
+
+# Spoof the MAC address of the scanning interface before scanning.
+# Applies only at Layer 2 (same local subnet). Requires root.
+# MAC is restored to original after scan completes.
+SPOOF_MAC = os.getenv("SPOOF_MAC", "false").lower() == "true"
+
+# Delay in seconds between banner grab requests per host in quiet mode.
+# Spreads out HTTP/RTSP probes so they don't look like a port sweep.
+QUIET_BANNER_DELAY = 1.0
+
+# ---------------------------------------------------------------------------
 # LLM models
 # ---------------------------------------------------------------------------
 

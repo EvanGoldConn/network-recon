@@ -12,7 +12,16 @@
 * [x] Working `agents/access_agent.py` (pre-refactor, stage-3 only)
 * [x] Verified mock pipeline runs end-to-end in stage-3
 
-### Session 2 — Architecture & Refactor
+### Session 3 — Stealth / Evasion + Real Hardware Baseline
+* [x] Added `--quiet` master flag + 6 granular stealth flags (`--slow-scan`, `--fragment`, `--decoys`, `--spoof-source-port`, `--randomize-hosts`, `--spoof-mac`)
+* [x] `--quiet` fans out to all granular flags; granular flags also work independently
+* [x] Stealth nmap args built in `scan_network()` — T1 timing, fragmentation, decoys, source port spoof, randomized host order
+* [x] MAC spoof helpers in `network_tools.py` — detect active interface, spoof before scan, restore in `finally` block
+* [x] Quiet banner grab — randomized port probe order + inter-probe delay in `grab_banner()`
+* [x] `log_stealth_config()` added to `EngagementContext` — writes active evasion flags to audit trail at engagement start
+* [x] Confirmed real hardware baseline scan — 6 live hosts found on home network (Fios router + extenders)
+* [x] Confirmed suspicious banner detection firing correctly on real hardware (`.1` and `.63`)
+* [x] Confirmed `--slow-scan` flag wires through to nmap correctly (T1 active, scan slows as expected)
 #### Environment
 * [x] Created new project root at `/Volumes/UTM_DRIVE/network-recon/`
 * [x] Created venv on external drive at `/Volumes/UTM_DRIVE/network-recon/venv/`
@@ -150,7 +159,7 @@ Security and reliability before expanding capability.
 ### Phase 4 — Remaining Agents
 Expand pipeline to full recon + reporting capability.
 
-* [ ] 10. Implement `agents/osint_agent.py` `run()`
+* [ ] 10. Implement `agents/osint_agent.py` `run()` ← NEXT
   * Shodan API integration (`shodan` library already installed)
   * Query for internet-exposed cameras/NVRs by IP range or org name
   * CVE lookup for identified device models

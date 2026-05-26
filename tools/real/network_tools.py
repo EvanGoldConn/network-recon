@@ -1,6 +1,3 @@
-
-
-
 import os
 import json
 import socket
@@ -9,7 +6,11 @@ import subprocess #run external CLI programs
 from requests.auth import HTTPDigestAuth, HTTPBasicAuth
 import nmap
 import ssl #for SSL Wrapping for 443
-from config import DEFAULT_TIMEOUT, HTTP_TIMEOUT, SCAN_PORTS, NMAP_TIMEOUT, ARTIFACTS_DIR, VERBOSE, DEBUG
+from config import (
+    DEFAULT_TIMEOUT, HTTP_TIMEOUT, SCAN_PORTS, NMAP_TIMEOUT, ARTIFACTS_DIR, VERBOSE, DEBUG,
+    SLOW_SCAN, FRAGMENT_PACKETS, USE_DECOYS, SPOOF_SOURCE_PORT,
+    RANDOMIZE_HOSTS, SPOOF_MAC, QUIET_BANNER_DELAY, QUIET
+)
 from core.vendors import (
     identify_vendor,
     identify_device_type,
@@ -19,6 +20,114 @@ from core.vendors import (
     is_rtsp_enabled_by_default,
     get_snapshot_path_for_vendor
 )
+
+
+# ---------------------------------------------------------------------------
+# MAC spoofing helpers
+# ---------------------------------------------------------------------------
+# These wrap macOS ifconfig commands to spoof and restore the MAC address
+# of the active network interface before/after a scan.
+#
+# REQUIRES ROOT: ifconfig on macOS requires root to change the MAC address.
+
+def _get_active_interface() -> str | None:
+    """
+    Find the active network interface by checking which one has a default route.
+    Returns interface name (e.g. 'en0') or None if detection fails.
+    """
+    try:
+        # 'route get default' tells us which interface the OS uses for outbound traffic
+        result = subprocess.run(
+            ["route", "get", "default"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            if "interface:" in line:
+                return line.split("interface:")[-1].strip()
+    except Exception:
+        pass
+    return None
+
+
+def _get_current_mac(interface: str) -> str | None:
+    """
+    Read the current MAC address of an interface via ifconfig.
+    Returns MAC string (e.g. 'a4:83:e7:12:34:56') or None if read fails.
+    """
+    try:
+        result = subprocess.run(
+            ["ifconfig", interface],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            if "ether" in line:
+                return line.strip().split()[1]
+    except Exception:
+        pass
+    return None
+
+
+def _generate_random_mac() -> str:
+    """
+    Generate a random locally-administered MAC address.
+
+    The second hex digit is forced to 2 (binary x010) which sets:
+      - bit 0 (multicast) = 0 → unicast
+      - bit 1 (locally administered) = 1 → locally assigned, not burned-in
+    This avoids accidentally spoofing a real OUI.
+    """
+    import random
+    # First octet: 0x02 = locally administered, unicast
+    octets = [0x02] + [random.randint(0x00, 0xFF) for _ in range(5)]
+    return ":".join(f"{b:02x}" for b in octets)
+
+
+def _set_mac(interface: str, mac: str) -> bool:
+    """
+    Set the MAC address of an interface via ifconfig. Requires root.
+    Returns True on success, False on failure.
+    """
+    try:
+        result = subprocess.run(
+            ["ifconfig", interface, "ether", mac],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _spoof_mac_context(interface: str) -> tuple[str | None, str | None]:
+    """
+    Spoof the MAC on the given interface to a random locally-administered address.
+
+    Returns (original_mac, spoofed_mac) so the caller can restore it afterwards.
+    Returns (None, None) if spoofing failed, caller should proceed without spoofing.
+    """
+    original_mac = _get_current_mac(interface)
+    if not original_mac:
+        print("[spoof_mac] Could not read current MAC — skipping MAC spoof") #NORMAL
+        return None, None
+
+    spoofed_mac = _generate_random_mac()
+    if _set_mac(interface, spoofed_mac):
+        print(f"[spoof_mac] Interface {interface}: {original_mac} → {spoofed_mac}") #NORMAL
+        return original_mac, spoofed_mac
+    else:
+        print(f"[spoof_mac] Failed to set MAC on {interface} — skipping MAC spoof") #NORMAL
+        return None, None
+
+
+def _restore_mac(interface: str, original_mac: str):
+    """
+    Restore the original MAC address after a scan completes.
+    Called in the finally block of scan_network() so it always runs.
+    """
+    if _set_mac(interface, original_mac):
+        print(f"[spoof_mac] Interface {interface} MAC restored to {original_mac}") #NORMAL
+    else:
+        print(f"[spoof_mac] WARNING: Failed to restore MAC on {interface}. Manual fix: sudo ifconfig {interface} ether {original_mac}") #NORMAL
+
 
 def scan_network(network_range: str) -> list:
     """
@@ -66,104 +175,168 @@ def scan_network(network_range: str) -> list:
     port_str = ",".join(str(p) for p in SCAN_PORTS)
     results = []
 
+    # --- Build stealth nmap argument extensions ---
+    # Each flag is independent — they stack on top of the base scan arguments.
+    # Constructed here once, used in both root and non-root paths below.
+    stealth_args = ""
+
+    if SLOW_SCAN:
+        # T1 = sneaky timing: 15s inter-probe delay. Very slow, very quiet.
+        # Default is T3. T0 (paranoid) is 5min/probe — overkill for LAN recon.
+        stealth_args += " -T1"
+        if VERBOSE: print("[scan_network] Stealth: slow timing (-T1) enabled") #VERBOSE
+    else:
+        # Explicit T3 so it's clear what's happening when not in quiet mode
+        stealth_args += " -T3"
+
+    if FRAGMENT_PACKETS:
+        # Split TCP probes into 8-byte fragments.
+        # Older IDS systems reassemble incorrectly or miss the fragments entirely.
+        stealth_args += " -f"
+        if VERBOSE: print("[scan_network] Stealth: packet fragmentation (-f) enabled") #VERBOSE
+
+    if USE_DECOYS:
+        # Inject 5 random spoofed source IPs alongside our real scan packets.
+        # The IDS can't tell which source is the real scanner.
+        stealth_args += " -D RND:5"
+        if VERBOSE: print("[scan_network] Stealth: decoy scanning (-D RND:5) enabled") #VERBOSE
+
+    if SPOOF_SOURCE_PORT:
+        # Use port 53 (DNS) as the TCP source port.
+        # Some firewalls/ACLs whitelist DNS traffic by source port.
+        stealth_args += " --source-port 53"
+        if VERBOSE: print("[scan_network] Stealth: source port spoof (--source-port 53) enabled") #VERBOSE
+
+    if RANDOMIZE_HOSTS:
+        # Scan hosts in random order rather than sequential .1/.2/.3...
+        # Sequential scans are a textbook IDS signature.
+        stealth_args += " --randomize-hosts"
+        if VERBOSE: print("[scan_network] Stealth: randomized host order enabled") #VERBOSE
+
+    if QUIET:
+        print("[scan_network] Quiet mode active — stealth scan in progress (this will be slow)") #NORMAL
+
+    # --- MAC spoofing setup ---
+    # Identify interface and spoof MAC before any packets leave the machine.
+    # original_mac is saved so we can restore it in the finally block.
+    original_mac = None
+    spoofed_interface = None
+
+    if SPOOF_MAC:
+        if os.geteuid() != 0:
+            print("[scan_network] Stealth: --spoof-mac requires root — skipping MAC spoof") #NORMAL
+        else:
+            spoofed_interface = _get_active_interface()
+            if spoofed_interface:
+                original_mac, _ = _spoof_mac_context(spoofed_interface)
+            else:
+                print("[scan_network] Stealth: could not detect active interface — skipping MAC spoof") #NORMAL
+
 
     # --- Step 2: Root path, ARP + SYN Scan ---
     # ARP > ICMP, devices can't block ARP Reqs, and gives us MAC addresses.. feed into the OUI-based vendor fingerprinting.
     
-    if os.geteuid() == 0:
-        print("[scan_network] Running as root — using ARP discovery + SYN scan") #NORMAL
-        try:
-            nm.scan(
-                hosts=network_range,
-                arguments=f"-PR -sS -p {port_str} --host-timeout {NMAP_TIMEOUT}s"
-            )
-        except Exception as e:
-            print(f"[scan_network] Root scan failed: {e}") #NORMAL
-            return results
+    try:
+        if os.geteuid() == 0:
+            print("[scan_network] Running as root — using ARP discovery + SYN scan") #NORMAL
+            try:
+                nm.scan(
+                    hosts=network_range,
+                    arguments=f"-PR -sS -p {port_str} --host-timeout {NMAP_TIMEOUT}s{stealth_args}"
+                )
+            except Exception as e:
+                print(f"[scan_network] Root scan failed: {e}") #NORMAL
+                return results
+            
+            # ---------------------------------------------------------------------------------
+            # NOTE2SELF: Future enhancement, for a full network mapper / advanced attack chain,
+            # consider adding arp-scan via subprocess here as a first pass before nmap.
+            # arp-scan is purpose-built for ARP, faster, and returns richer MAC/OUI vendor
+            # data than nmap's -PR implementation. Requires: apt install arp-scan (Kali)
+            # or brew install arp-scan (macOS). Currently using nmap -PR for portability
+            # since arp-scan is not guaranteed to be installed on all engagement machines.
+            # ---------------------------------------------------------------------------------
+
+
+
+        # --- Step 3: NON-ROOT: --— skip discovery, port scan is the filter
+        # -Pn skips ping/ARP discovery entirely and assumes all hosts are up.
+        # We then port scan everything. Hosts with zero open ports are discarded.
+        # This sidesteps ISP routers that answer ICMP on behalf of every IP,
+        # which causes ping sweeps to return the entire /24 as "alive".
         
-        # ---------------------------------------------------------------------------------
-        # NOTE2SELF: Future enhancement, for a full network mapper / advanced attack chain,
-        # consider adding arp-scan via subprocess here as a first pass before nmap.
-        # arp-scan is purpose-built for ARP, faster, and returns richer MAC/OUI vendor
-        # data than nmap's -PR implementation. Requires: apt install arp-scan (Kali)
-        # or brew install arp-scan (macOS). Currently using nmap -PR for portability
-        # since arp-scan is not guaranteed to be installed on all engagement machines.
-        # ---------------------------------------------------------------------------------
+
+            # ---------------------------------------------------------------------------------
+            # NOTE: The non-root path (-Pn) is unreliable on networks with proxy ARP or
+            # ISP routers that intercept TCP connections on behalf of every IP in the subnet
+            # (e.g. Verizon Fios Quantum Gateway). On these networks, ports 80/443/8080 will
+            # appear open on all 256 IPs regardless of whether a device exists there.
+            # For accurate results, always run with sudo — ARP is ground truth and cannot
+            # be faked at Layer 2. On Kali this is the default. On macOS use: sudo python main.py
+            # ---------------------------------------------------------------------------------
+        
+        else:
+            print("[scan_network] Non-root — skipping discovery, using -Pn TCP scan") #NORMAL
+            try:
+                nm.scan(
+                    hosts=network_range,
+                    arguments=f"-Pn -sT -p {port_str} --host-timeout {NMAP_TIMEOUT}s{stealth_args}"
+                )
+            except Exception as e:
+                print(f"[scan_network] Non-root scan failed: {e}") #NORMAL
+                return results
 
 
+        # --- Step 4: Parse results ---
+        # Both paths above populate the same nm object.
+        # Filter out anything with no open ports — those are dead IPs that
+        # -Pn scanned speculatively and found nothing on.
+        for ip in nm.all_hosts():
+            try:
+                open_ports = []
+                if "tcp" in nm[ip]:
+                    open_ports = [
+                        port for port, data in nm[ip]["tcp"].items()
+                        if data["state"] == "open"
+                    ]
 
-    # --- Step 3: NON-ROOT: --— skip discovery, port scan is the filter
-    # -Pn skips ping/ARP discovery entirely and assumes all hosts are up.
-    # We then port scan everything. Hosts with zero open ports are discarded.
-    # This sidesteps ISP routers that answer ICMP on behalf of every IP,
-    # which causes ping sweeps to return the entire /24 as "alive".
-    
+                # Skip hosts with no open ports — not real devices
+                if not open_ports:
+                    continue
 
-        # ---------------------------------------------------------------------------------
-        # NOTE: The non-root path (-Pn) is unreliable on networks with proxy ARP or
-        # ISP routers that intercept TCP connections on behalf of every IP in the subnet
-        # (e.g. Verizon Fios Quantum Gateway). On these networks, ports 80/443/8080 will
-        # appear open on all 256 IPs regardless of whether a device exists there.
-        # For accurate results, always run with sudo — ARP is ground truth and cannot
-        # be faked at Layer 2. On Kali this is the default. On macOS use: sudo python main.py
-        # ---------------------------------------------------------------------------------
-    
-    else:
-        print("[scan_network] Non-root — skipping discovery, using -Pn TCP scan") #NORMAL
-        try:
-            nm.scan(
-                hosts=network_range,
-                arguments=f"-Pn -sT -p {port_str} --host-timeout {NMAP_TIMEOUT}s"
-            )
-        except Exception as e:
-            print(f"[scan_network] Non-root scan failed: {e}") #NORMAL
-            return results
+                # Hostname from nmap reverse DNS if available
+                hostname = nm[ip].hostname() or None
 
+                # MAC address — only available when root (ARP-level access)
+                mac = None
+                if "addresses" in nm[ip] and "mac" in nm[ip]["addresses"]:
+                    mac = nm[ip]["addresses"]["mac"]
 
-    # --- Step 4: Parse results ---
-    # Both paths above populate the same nm object.
-    # Filter out anything with no open ports — those are dead IPs that
-    # -Pn scanned speculatively and found nothing on.
-    for ip in nm.all_hosts():
-        try:
-            open_ports = []
-            if "tcp" in nm[ip]:
-                open_ports = [
-                    port for port, data in nm[ip]["tcp"].items()
-                    if data["state"] == "open"
-                ]
+                # Fingerprint from ports alone for now.
+                # grab_banner() enriches vendor detection — agents call it separately.
+                vendor = identify_vendor("", open_ports, hostname or "")
+                device_type = identify_device_type(open_ports, vendor)
 
-            # Skip hosts with no open ports — not real devices
-            if not open_ports:
+                results.append({
+                    "ip": ip,
+                    "mac": mac,
+                    "hostname": hostname,
+                    "open_ports": open_ports,
+                    "device_type": device_type,
+                    "vendor": vendor,
+                })
+
+                if VERBOSE: print(f"[scan_network] {ip} — ports: {open_ports}, vendor: {vendor}") #VERBOSE
+
+            except Exception as e:
+                print(f"[scan_network] Failed to parse result for {ip}: {e}") #NORMAL
                 continue
 
-            # Hostname from nmap reverse DNS if available
-            hostname = nm[ip].hostname() or None
-
-            # MAC address — only available when root (ARP-level access)
-            mac = None
-            if "addresses" in nm[ip] and "mac" in nm[ip]["addresses"]:
-                mac = nm[ip]["addresses"]["mac"]
-
-            # Fingerprint from ports alone for now.
-            # grab_banner() enriches vendor detection — agents call it separately.
-            vendor = identify_vendor("", open_ports, hostname or "")
-            device_type = identify_device_type(open_ports, vendor)
-
-            results.append({
-                "ip": ip,
-                "mac": mac,
-                "hostname": hostname,
-                "open_ports": open_ports,
-                "device_type": device_type,
-                "vendor": vendor,
-            })
-
-            if VERBOSE: print(f"[scan_network] {ip} — ports: {open_ports}, vendor: {vendor}") #VERBOSE
-
-        except Exception as e:
-            print(f"[scan_network] Failed to parse result for {ip}: {e}") #NORMAL
-            continue
+    finally:
+        # Always restore the original MAC, even if the scan threw an exception.
+        # A dangling spoofed MAC on your interface is worse than a failed scan.
+        if SPOOF_MAC and spoofed_interface and original_mac:
+            _restore_mac(spoofed_interface, original_mac)
 
     print(f"[scan_network] Done — {len(results)} live hosts found") #NORMAL
     return results
@@ -190,6 +363,15 @@ def grab_banner(ip: str, open_ports: list = None) -> dict:
     # Fall back to common camera/web ports if caller doesn't provide open ports.
     # This keeps the function usable standalone without requiring a prior scan.
     ports_to_probe = open_ports if open_ports is not None else [80, 443, 554, 8080]
+
+    # In quiet mode, randomize the order we probe ports on each host.
+    # Hitting 80, 554, 8080 sequentially on every host looks like a tool sweep.
+    # Random ordering breaks the timing signature.
+    if QUIET:
+        import random
+        ports_to_probe = list(ports_to_probe)  # don't mutate the caller's list
+        random.shuffle(ports_to_probe)
+        if VERBOSE: print(f"[grab_banner] Quiet mode: randomized port probe order for {ip}") #VERBOSE
 
     banners = {}
 
@@ -298,6 +480,13 @@ def grab_banner(ip: str, open_ports: list = None) -> dict:
         finally:
             # Always close the socket, even if an exception occurred
             s.close()
+
+        # In quiet mode, pause between port probes on the same host.
+        # Without this, probing 80/554/8080 in rapid succession looks like a sweep
+        # even with randomized order. The delay breaks the timing pattern.
+        if QUIET:
+            import time
+            time.sleep(QUIET_BANNER_DELAY)
 
     return {
         "ip": ip,

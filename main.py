@@ -71,6 +71,56 @@ def main():
     help="Skip report generation."
 )
 
+    # --- Stealth / evasion flags ---
+    # --quiet enables all sub-options at once (the preset).
+    # Each sub-option can also be passed independently for surgical control.
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable all stealth/evasion options: slow scan timing, packet fragmentation, "
+            "decoy IPs, DNS source port spoofing, randomized host order, MAC spoofing, "
+            "and delayed banner grabs. Equivalent to passing all granular flags together."
+        )
+    )
+    parser.add_argument(
+        "--slow-scan",
+        action="store_true",
+        default=False,
+        help="Drop nmap timing to T1 (sneaky) — 15s inter-probe delay. Slow but low-noise."
+    )
+    parser.add_argument(
+        "--fragment",
+        action="store_true",
+        default=False,
+        help="Fragment TCP probes into 8-byte chunks (-f). Defeats older IDS payload signatures. Requires root."
+    )
+    parser.add_argument(
+        "--decoys",
+        action="store_true",
+        default=False,
+        help="Send probes from 5 randomly spoofed decoy IPs alongside real IP (-D RND:5). Requires root."
+    )
+    parser.add_argument(
+        "--spoof-source-port",
+        action="store_true",
+        default=False,
+        help="Spoof nmap source port to 53 (DNS). Some firewalls whitelist DNS source ports."
+    )
+    parser.add_argument(
+        "--randomize-hosts",
+        action="store_true",
+        default=False,
+        help="Randomize host scan order. Sequential scanning is a common IDS trigger."
+    )
+    parser.add_argument(
+        "--spoof-mac",
+        action="store_true",
+        default=False,
+        help="Spoof MAC address of scanning interface before scan, restore after. Layer 2 only. Requires root."
+    )
+
     args = parser.parse_args()
 
     if args.mock:
@@ -82,6 +132,31 @@ def main():
         os.environ["VERBOSE"] = "true"  # debug implies verbose
     if args.no_report:
         os.environ["NO_REPORT"] = "true"
+
+    # --- Stealth flag wiring ---
+    # --quiet fans out to all granular flags. Granular flags can also be set independently.
+    # We write to os.environ so config.py picks them up when modules import it.
+    if args.quiet:
+        os.environ["QUIET"]             = "true"
+        os.environ["SLOW_SCAN"]         = "true"
+        os.environ["FRAGMENT_PACKETS"]  = "true"
+        os.environ["USE_DECOYS"]        = "true"
+        os.environ["SPOOF_SOURCE_PORT"] = "true"
+        os.environ["RANDOMIZE_HOSTS"]   = "true"
+        os.environ["SPOOF_MAC"]         = "true"
+    # Granular flags: set individually if passed, regardless of --quiet
+    if args.slow_scan:
+        os.environ["SLOW_SCAN"]         = "true"
+    if args.fragment:
+        os.environ["FRAGMENT_PACKETS"]  = "true"
+    if args.decoys:
+        os.environ["USE_DECOYS"]        = "true"
+    if args.spoof_source_port:
+        os.environ["SPOOF_SOURCE_PORT"] = "true"
+    if args.randomize_hosts:
+        os.environ["RANDOMIZE_HOSTS"]   = "true"
+    if args.spoof_mac:
+        os.environ["SPOOF_MAC"]         = "true"
 
         
     # Import all agents to trigger @AgentRegistry.register decorators.
@@ -114,6 +189,10 @@ def main():
     print(f"\n[Main] Engagement ID: {ctx.engagement_id}")
     print(f"[Main] Mode: {os.getenv('MODE', 'real')}")
     print(f"[Main] Scope: {ctx.target_scope or 'auto-detect'}")
+
+    # Log active stealth settings to audit trail before any agent runs.
+    # This ensures chain of custody includes evasion config for the report.
+    ctx.log_stealth_config()
 
     # Build and run pipeline
     runner = PipelineRunner(ctx, verbose=True)

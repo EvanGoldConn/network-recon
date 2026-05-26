@@ -111,6 +111,15 @@ sudo python main.py --verbose
 --engagement-id my-test    # custom engagement ID
 --no-report                # skip report generation
 --resume results/engagement-xyz.json
+
+# Stealth / evasion (real mode only — no effect in mock)
+--quiet                    # enable all stealth options at once
+--slow-scan                # nmap T1 timing (15s inter-probe delay) — very slow
+--fragment                 # fragment TCP probes into 8-byte chunks (-f), requires root
+--decoys                   # send probes from 5 spoofed decoy IPs (-D RND:5), requires root
+--spoof-source-port        # spoof nmap source port to 53 (DNS)
+--randomize-hosts          # randomize host scan order
+--spoof-mac                # spoof MAC address before scan, restore after, requires root
 ```
 
 ---
@@ -135,6 +144,7 @@ sudo python main.py --verbose
 | DiscoveryAgent (scan, banner, fingerprint, LLM fallback) | ✅ |
 | CameraAccessAgent (creds, RTSP, frame capture) | ✅ |
 | ReportingAgent (CVE mapping, LLM writing, PDF) | ✅ |
+| Stealth/evasion flags (--quiet + granular) | ✅ |
 | LateralMovementAgent | 🔧 stub |
 | WiFiAgent | 🔧 stub (Kali only) |
 | OSINTAgent | 🔧 stub (needs Shodan key) |
