@@ -26,6 +26,12 @@ SCOPE ENFORCEMENT:
     hard enforcement is critical here.
 
 LLM: Claude Sonnet (most reasoning-heavy stage)
+
+TODO: Implement run() — planned phases:
+    Phase 1 — Credential reuse across all confirmed_hosts
+    Phase 2 — NVR config download and camera enumeration
+    Phase 3 — Router/gateway admin panel testing
+    Phase 4 — SSH testing with discovered credentials
 """
 
 from core.base_agent import BaseAgent, AgentRegistry
@@ -42,10 +48,18 @@ class LateralMovementAgent(BaseAgent):
     requires_network = True
     requires_llm = True
 
-    def run(self, ctx: EngagementContext) -> EngagementContext:
-        raise NotImplementedError("LateralMovementAgent.run() — implementation pending")
-
     def can_run(self, ctx: EngagementContext) -> tuple[bool, str]:
         if not ctx.credentials_found:
             return False, "No credentials available. Run AccessAgent first."
         return True, ""
+
+    def run(self, ctx: EngagementContext) -> EngagementContext:
+        """
+        Lateral movement via credential reuse across discovered hosts.
+        Implementation pending — see TODO in module docstring.
+        """
+        ctx.current_stage = self.stage
+        ctx.log(self.name, "LateralMovementAgent — implementation pending, skipping")
+        print("[LateralMovementAgent] Not yet implemented — skipping")
+        ctx.mark_stage_complete(self.stage)
+        return ctx

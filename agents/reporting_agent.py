@@ -54,7 +54,7 @@ from core.base_agent import BaseAgent, AgentRegistry
 from core.engagement import EngagementContext, CVERecord
 from core.vendors import VENDOR_PROFILES
 from core.llm_defense import wrap_for_llm
-from config import REPORTING_MODEL, REPORTS_DIR, ARTIFACTS_DIR, VERBOSE, DEBUG
+from config import REPORTING_MODEL, REPORTS_DIR, ARTIFACTS_DIR, VERBOSE, DEBUG, NO_REPORT
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +475,8 @@ class ReportingAgent(BaseAgent):
     requires_llm = True
  
     def can_run(self, ctx: EngagementContext) -> tuple[bool, str]:
+        if NO_REPORT:
+            return False, "Report generation disabled via --no-report flag."
         if not ctx.confirmed_hosts and not ctx.exposed_services:
             return False, "Nothing to report. Run at least one discovery stage first."
         return True, ""

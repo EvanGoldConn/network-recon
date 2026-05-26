@@ -74,6 +74,11 @@ VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
 # ---------------------------------------------------------------------------
+# Report writing mode
+# ---------------------------------------------------------------------------
+NO_REPORT = os.getenv("NO_REPORT", "false").lower() == "true"
+
+# ---------------------------------------------------------------------------
 # LLM models
 # ---------------------------------------------------------------------------
 
@@ -87,7 +92,7 @@ ACCESS_MODEL = os.getenv("ACCESS_MODEL", "claude-haiku-4-5-20251001")
 # Anthropic model — used by LateralMovementAgent and ReportingAgent
 # Sonnet is used here because lateral movement and report generation require
 # heavier reasoning than discovery or credential testing
-REPORTING_MODEL = os.getenv("REPORTING_MODEL", "claude-sonnet-4-20250514")
+REPORTING_MODEL = os.getenv("REPORTING_MODEL", "claude-sonnet-4-5")
 
 
 # ---------------------------------------------------------------------------

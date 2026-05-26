@@ -84,7 +84,7 @@ VENDOR_PROFILES = {
     "dahua": {
         "display_name": "Dahua",
         "fingerprint": [
-            "dahua", "dvr webserver", "rpc2_login", "lechange",
+            "dahua", "dahua-webs", "dvr webserver", "rpc2_login", "lechange",
             "ipc-", "sd-", "nvr",
         ],
         "typical_ports": [80, 443, 554, 37777, 37778],

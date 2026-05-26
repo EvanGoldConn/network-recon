@@ -64,6 +64,12 @@ def main():
     default=False,
     help="Enable debug output — raw banners, LLM prompts, internal state. Implies verbose."
     )
+    parser.add_argument(
+    "--no-report",
+    action="store_true",
+    default=False,
+    help="Skip report generation."
+)
 
     args = parser.parse_args()
 
@@ -74,7 +80,10 @@ def main():
     if args.debug:
         os.environ["DEBUG"] = "true"
         os.environ["VERBOSE"] = "true"  # debug implies verbose
+    if args.no_report:
+        os.environ["NO_REPORT"] = "true"
 
+        
     # Import all agents to trigger @AgentRegistry.register decorators.
     # Order here doesn't matter — pipeline order is defined in AgentRegistry.PIPELINE_ORDER.
     from agents.wifi_agent import WiFiAgent
