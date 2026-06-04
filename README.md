@@ -12,7 +12,7 @@ This tool is for networks you own or have **explicit written authorization** to 
 
 ## What it does
 
-Runs a sequential agent pipeline against a target network. Each stage feeds into the next via a shared `EngagementContext` object.
+Runs a sequential agent pipeline against a target network. Each stage feeds into the shared `EngagementContext` object.
 
 ```
 WiFiAgent → OSINTAgent → DiscoveryAgent → CameraAccessAgent → LateralMovementAgent → ReportingAgent
@@ -35,12 +35,12 @@ network-recon/
 │   └── llm_defense.py         # Prompt injection defense utilities
 │
 ├── agents/
+│   ├── wifi_agent.py          # Stage 0: PMKID/EAPOL capture, PSK crack, network join
+│   ├── osint_agent.py         # Stage 1: Shodan recon, public IP detection, CVE enrichment
 │   ├── discovery_agent.py     # Stage 2: nmap scan, banner grab, vendor fingerprinting
 │   ├── camera_access_agent.py # Stage 3: credential testing, RTSP, frame capture
 │   ├── lateral_agent.py       # Stage 4: credential reuse, NVR pivot (stub)
-│   ├── reporting_agent.py     # Stage 5: PDF + Markdown report generation
-│   ├── wifi_agent.py          # Stage 0: WPA crack (Kali only, stub)
-│   └── osint_agent.py         # Stage 1: Shodan recon, public IP detection, CVE enrichment
+│   └── reporting_agent.py     # Stage 5: PDF + Markdown report generation
 │
 ├── tools/
 │   ├── __init__.py            # Swaps real vs mock based on MODE in .env
@@ -69,10 +69,10 @@ network-recon/
 # Python deps
 pip install langchain langchain-ollama langchain-anthropic python-nmap \
             requests opencv-python python-dotenv pydantic \
-            weasyprint markdown
+            weasyprint markdown paramiko scp
 
 # System deps (macOS)
-brew install nmap pango
+brew install nmap pango hashcat
 
 # Ollama (local LLM for discovery)
 ollama pull qwen2.5:7b
@@ -85,7 +85,9 @@ AGENT_MODEL=qwen2.5:7b
 ACCESS_MODEL=claude-haiku-4-5
 REPORTING_MODEL=claude-sonnet-4-5
 ANTHROPIC_API_KEY=your_key
-SHODAN_API_KEY=           # optional, needed for OSINTAgent
+SHODAN_API_KEY=                         # optional, needed for OSINTAgent
+HASHCAT_WORDLIST=/path/to/rockyou.txt   # needed for WiFiAgent
+PI_SSH_KEY=~/.ssh/your_pi_key           # needed for WiFiAgent
 VERBOSE=false
 DEBUG=false
 NO_REPORT=false
@@ -129,11 +131,36 @@ sudo python main.py --verbose
 
 ---
 
+## WiFiAgent
+
+Requires a Raspberry Pi with a monitor-mode capable adapter (Alfa AWUS036ACM confirmed working).
+The Pi handles all wireless operations over SSH. The Mac handles cracking via Metal GPU.
+
+```
+Pi:  hcxdumptool scan → hcxdumptool capture → hcxpcapngtool convert
+Mac: scp pull → hashcat crack → networksetup join → DiscoveryAgent handoff
+```
+
+Prerequisites:
+- Pi reachable at `192.168.1.254` (WiFi) or `192.168.1.95` (ethernet)
+- Key-based SSH auth configured (set `PI_SSH_KEY` in `.env`)
+- `HASHCAT_WORDLIST` set in `.env`
+- `paramiko` and `scp` installed in venv
+
+Known limitations:
+- PMKID capture requires AP to include PMKID in association frames — not all routers do
+- Falls back to EAPOL handshake capture if no PMKID seen
+- 5GHz scan uses `-F` flag (all available frequencies on adapter)
+- iOS hotspot MAC randomization may prevent BPF filter from matching — workaround pending
+- PSK crack only succeeds if passphrase is in the wordlist
+
+---
+
 ## Key design decisions
 
-**Scope enforcement in Python, not the LLM** — every network connection calls `ctx.enforce_scope(ip)` before firing. LLM output can't expand scope. This matters because camera banners are attacker-controlled and could contain prompt injection attempts.
+**Scope enforcement in Python, not the LLM** — every network connection calls `ctx.enforce_scope(ip)` before firing. LLM output cannot expand scope.
 
-**Prompt injection defense** — banner content is XML-wrapped before LLM ingestion (`<banner_data source="ip">...</banner_data>`) and checked against injection heuristics. A TODO comment marks where a secondary model guard would slot in.
+**Prompt injection defense** — banner content is XML-wrapped before LLM ingestion (`<banner_data source="ip">...</banner_data>`) and checked against injection heuristics. A TODO marks where a secondary model guard would slot in.
 
 **Three-tier credential strategy** — credential reuse from ctx first, vendor-specific defaults second, curated SecLists camera list third. Deduped per host.
 
@@ -146,13 +173,22 @@ sudo python main.py --verbose
 | Component | Status |
 |-----------|--------|
 | EngagementContext + framework | ✅ |
+| OSINTAgent (Shodan, CVE enrichment, public IP) | ✅ |
 | DiscoveryAgent (scan, banner, fingerprint, LLM fallback) | ✅ |
 | CameraAccessAgent (creds, RTSP, frame capture) | ✅ |
 | ReportingAgent (CVE mapping, LLM writing, PDF) | ✅ |
 | Stealth/evasion flags (--quiet + granular) | ✅ |
-| OSINTAgent (Shodan lookup, CVE enrichment, public IP detection) | ✅ |
+| WiFiAgent (PMKID/EAPOL capture, crack, join) | ✅ |
 | LateralMovementAgent | 🔧 stub |
-| WiFiAgent | 🔧 in progress (Kali only) |
+
+---
+
+## Known issues / TODO
+
+- WiFiAgent: iOS hotspot BPF filter fails due to MAC randomization — need SSID-based filter fallback
+- WiFiAgent: incomplete EAPOL handshakes can produce false positive crack results — deauth improvement needed
+- LateralMovementAgent: not yet implemented
+- OSINTAgent Phase 2 (ARIN, BGP/ASN, geo-filter): stubbed in ctx, not yet implemented
 
 ---
 

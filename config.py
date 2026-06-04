@@ -178,3 +178,14 @@ SHODAN_API_KEY    = os.getenv("SHODAN_API_KEY", "")
 # in output files. Generate with: from cryptography.fernet import Fernet;
 # print(Fernet.generate_key().decode())
 RESULTS_ENCRYPTION_KEY = os.getenv("RESULTS_ENCRYPTION_KEY", "")
+
+# ---------------------------------------------------------------------------
+# WiFiAgent
+# ---------------------------------------------------------------------------
+
+# Path to wordlist used by hashcat for PSK cracking.
+# rockyou.txt is the standard starting point, swap for a targeted list
+# on engagements where you have org-specific intelligence.
+HASHCAT_WORDLIST = os.getenv("HASHCAT_WORDLIST", "")
+
+PI_SSH_KEY = os.getenv("PI_SSH_KEY", "")
