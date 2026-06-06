@@ -222,12 +222,15 @@ def main():
     # Build and run pipeline
     runner = PipelineRunner(ctx, verbose=True)
 
-    if args.stages:
-        for stage in args.stages:
-            runner.add_stage(stage)
-        ctx = runner.run()
-    else:
-        ctx = runner.run_all()
+    try:
+        if args.stages:
+            for stage in args.stages:
+                runner.add_stage(stage)
+            ctx = runner.run()
+        else:
+            ctx = runner.run_all()
+    except KeyboardInterrupt:
+        print(f"\n[Main] Interrupted by operator -- shutting down cleanly")
 
     print(f"\n[Main] Pipeline complete.\n")
     print(ctx.summary())

