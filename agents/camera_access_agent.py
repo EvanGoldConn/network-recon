@@ -344,6 +344,7 @@ class CameraAccessAgent(BaseAgent):
                         result=f"{username}:{display_pass} access_level={result.get('access_level')}"
                     )
                     successful_creds.append(result)
+                    break  # stop testing credentials on first success, avoid cred spraying lockout
 
                 else:
                     if VERBOSE:
@@ -387,7 +388,8 @@ class CameraAccessAgent(BaseAgent):
                         password=password,
                         vendor=vendor,
                         token=token,
-                        engagement_id=ctx.engagement_id or "default"
+                        engagement_id=ctx.engagement_id or "default",
+                        device_type=host.get("device_type", "camera")
                     )
                 except Exception as e:
                     ctx.log(self.name, "capture_frame error", target=ip, result=str(e))
@@ -395,23 +397,26 @@ class CameraAccessAgent(BaseAgent):
                     capture = {"status": "failed"}
 
                 if capture.get("status") == "captured":
-                    artifact = ArtifactRecord(
-                        artifact_type="frame_capture",
-                        file_path=capture["artifact_path"],
-                        source_ip=ip,
-                        description=(
-                            f"{vendor} {host.get('device_type')} at {hostname} — "
-                            f"captured via {capture.get('method', 'unknown')}"
+                    # Handle both single capture and multi-channel NVR capture
+                    all_artifacts = capture.get("artifacts") or [capture["artifact_path"]]
+                    for artifact_path in all_artifacts:
+                        artifact = ArtifactRecord(
+                            artifact_type="frame_capture",
+                            file_path=artifact_path,
+                            source_ip=ip,
+                            description=(
+                                f"{vendor} {host.get('device_type')} at {hostname} — "
+                                f"captured via {capture.get('method', 'unknown')}"
+                            )
                         )
-                    )
-                    ctx.add_artifact(artifact)
-                    ctx.log(
-                        self.name,
-                        "Frame captured",
-                        target=ip,
-                        result=capture["artifact_path"]
-                    )
-                    print(f"[CameraAccessAgent] ✓  Frame saved: {capture['artifact_path']}") #NORMAL
+                        ctx.add_artifact(artifact)
+                        ctx.log(
+                            self.name,
+                            "Frame captured",
+                            target=ip,
+                            result=artifact_path
+                        )
+                        print(f"[CameraAccessAgent] ✓  Frame saved: {artifact_path}") #NORMAL
                 else:
                     ctx.log(self.name, "Frame capture failed", target=ip, result="no artifact")
                     print(f"[CameraAccessAgent] ✗  Frame capture failed on {ip}") #NORMAL

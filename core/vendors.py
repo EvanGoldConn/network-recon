@@ -179,7 +179,7 @@ VENDOR_PROFILES = {
         # Reolink JSON API snapshot endpoint.
         # The {token} placeholder is replaced at runtime with the session token
         # returned by _try_reolink_json_auth() after successful login.
-        "snapshot_path": "/cgi-bin/api.cgi?cmd=Snap&channel=0&rs={token}",
+        "snapshot_path": "/cgi-bin/api.cgi?cmd=Snap&channel={channel}&rs=capture&user={username}&password={password}",
         "known_cves": [],
         "notes": "Reolink uses a JSON API. Login endpoint returns a token for subsequent requests. "
                  "Admin with empty password is the most common default. "
